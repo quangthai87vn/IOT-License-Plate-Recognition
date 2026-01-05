@@ -26,3 +26,4 @@ services:
     working_dir: /work
     stdin_open: true
     tty: true
+    

@@ -1,0 +1,15 @@
+# requirements-trungdinh22.txt
+# torch/torchvision đã có sẵn trong image l4t-pytorch => không cài lại
+# opencv dùng apt (python3-opencv) => không dùng opencv-python
+
+numpy
+Pillow
+tqdm
+matplotlib
+pandas
+seaborn
+pyyaml
+requests
+scipy
+imutils
+
