@@ -88,13 +88,20 @@ python3 rtsp.py "rtsp://192.168.50.2:8554/mac"
 
 
 docker run --rm -it \
-  --runtime nvidia --network host \
-  -e DISPLAY=$DISPLAY -e QT_X11_NO_MITSHM=1 \
+  --runtime nvidia \
+  --network host \
+  --ipc=host \
+  --privileged \
+  -e DISPLAY=$DISPLAY \
+  -e QT_X11_NO_MITSHM=1 \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
   -v /tmp/argus_socket:/tmp/argus_socket \
-  -v "$PWD":/workspace -w /workspace \
-  --device /dev/video0 \
+  -v /dev:/dev \
+  -v "$PWD":/workspace \
+  -w /workspace \
   iot-license-plate-recognition:jetson-lpr \
+  bash
+
   python3 csi.py
 
 
@@ -113,4 +120,15 @@ docker run --rm -it \
   iot-license-plate-recognition:jetson-lpr \
   python3 rtsp.py
 
+```
+
+
+
+## Test CSI pipeline trong container trước khi chạy YOLO - Trong container chạy:
+
+```bash
+gst-launch-1.0 nvarguscamerasrc sensor-id=0 ! \
+"video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1" ! \
+nvvidconv ! "video/x-raw,format=BGRx" ! videoconvert ! \
+fakesink -v
 ```
