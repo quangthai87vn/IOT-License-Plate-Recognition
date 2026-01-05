@@ -59,3 +59,21 @@ Use code in ./training folder
   training/Plate_detection.ipynb     #for LP_Detection
   training/Letter_detection.ipynb    #for Letter_detection
 ```
+
+
+
+
+
+
+## Cài Docker (nếu máy chưa có)
+
+```bash
+#Jetson thường cài sẵn/hoặc cài nhanh:
+
+sudo apt update
+sudo apt install -y docker.io docker-compose
+sudo usermod -aG docker $USER
+newgrp docker
+docker --version
+docker compose version
+```

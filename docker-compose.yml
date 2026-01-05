@@ -1,0 +1,21 @@
+services:
+  alpr:
+    build:
+      context: .
+      dockerfile: Dockerfile.jetson
+    container_name: alpr_jetson
+    runtime: nvidia
+    network_mode: host
+    environment:
+      - DISPLAY=${DISPLAY}
+      - QT_X11_NO_MITSHM=1
+      - CAM_SRC=${CAM_SRC:-0}   # 0 (USB) / csi / rtsp://...
+    volumes:
+      - ./:/work
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - /tmp/argus_socket:/tmp/argus_socket   # CSI camera
+    devices:
+      - /dev/video0:/dev/video0
+    working_dir: /work
+    stdin_open: true
+    tty: true
