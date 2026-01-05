@@ -5,8 +5,14 @@ FROM nvcr.io/nvidia/l4t-pytorch:r32.7.1-pth1.10-py3
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /workspace
 
-# remove broken kitware repo (missing GPG key)
-RUN rm -f /etc/apt/sources.list.d/kitware.list /etc/apt/sources.list.d/kitware*.list || true
+# remove broken kitware repo (missing GPG key) - HARD CLEAN
+RUN set -eux; \
+    rm -f /etc/apt/sources.list.d/*kitware* || true; \
+    sed -i '/apt.kitware.com/d' /etc/apt/sources.list || true; \
+    for f in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+      [ -f "$f" ] && sed -i '/apt.kitware.com/d' "$f" || true; \
+    done
+
 
 # Cài OpenCV bằng apt cho chắc (đỡ fail opencv-python trên ARM)
 # + GStreamer + libs GUI để cv2.imshow chạy được khi có HDMI
