@@ -1,18 +1,23 @@
+# JetPack 4.6.x thường là R32.7.x => dùng base này là hợp bài
 FROM nvcr.io/nvidia/l4t-pytorch:r32.7.1-pth1.10-py3
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /work
 
-# libs cho OpenCV + video + GUI (imshow)
+# OpenCV + GStreamer + libs để cv2.imshow chạy được khi có HDMI
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-opencv \
     libglib2.0-0 libsm6 libxext6 libxrender1 \
-    gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+    gstreamer1.0-tools \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
     && rm -rf /var/lib/apt/lists/*
 
-# pip tools
 RUN python3 -m pip install --upgrade pip setuptools wheel
 
-# NOTE: repo requirements đôi khi có torch/torchvision -> đừng cài lại (Jetson torch đã có sẵn trong image)
-# Mình sẽ cài requirements theo file đã lọc bên ngoài bằng docker-compose (bước dưới)
+# Cài deps "không đụng torch/torchvision/opencv-python"
+COPY requirements-jetson.txt /tmp/requirements-jetson.txt
+RUN python3 -m pip install -r /tmp/requirements-jetson.txt
+
+# (tuỳ chọn) kiểm tra nhanh
+RUN python3 -c "import cv2, torch; print('OK | cv2:', cv2.__version__, '| torch:', torch.__version__)"

@@ -1,0 +1,8 @@
+matplotlib
+numpy
+Pillow
+tqdm
+pyyaml
+requests
+pandas
+seaborn

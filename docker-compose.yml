@@ -9,11 +9,11 @@ services:
     environment:
       - DISPLAY=${DISPLAY}
       - QT_X11_NO_MITSHM=1
-      - CAM_SRC=${CAM_SRC:-0}   # 0 (USB) / csi / rtsp://...
+      - CAM_SRC=${CAM_SRC:-0}   # 0 / 1 / csi / rtsp://...
     volumes:
       - ./:/work
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
-      - /tmp/argus_socket:/tmp/argus_socket   # CSI camera
+      - /tmp/argus_socket:/tmp/argus_socket   # CSI camera (nvargus)
     devices:
       - /dev/video0:/dev/video0
     working_dir: /work
