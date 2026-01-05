@@ -22,7 +22,8 @@ FORCE_INDEX = int(os.getenv("FORCE_INDEX", "0"))
 _real = cv2.VideoCapture
 
 def patched_VideoCapture(*args, **kwargs):
-    if len(args) >= 1 and (args[0] == FORCE_INDEX or args[0] == str(FORCE_INDEX)):
+    # patch cả 0 và 1 để khỏi lệch repo
+    if len(args) >= 1 and str(args[0]) in ("0", "1"):
         gst = gstreamer_pipeline(CSI_W, CSI_H, CSI_FPS, CSI_FLIP)
         return _real(gst, cv2.CAP_GSTREAMER)
     return _real(*args, **kwargs)
@@ -31,3 +32,4 @@ cv2.VideoCapture = patched_VideoCapture
 
 print(f"[csi.py] CSI {CSI_W}x{CSI_H}@{CSI_FPS} flip={CSI_FLIP}")
 runpy.run_path("webcam.py", run_name="__main__")
+
