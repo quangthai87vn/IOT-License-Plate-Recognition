@@ -1,35 +1,34 @@
-# csi.py - ép cv2.VideoCapture(0) => CSI GStreamer pipeline rồi chạy webcam.py
-import os
-import runpy
-import cv2
 
-def gstreamer_pipeline(width=1280, height=720, fps=30, flip=0):
-    return (
-        "nvarguscamerasrc ! "
-        f"video/x-raw(memory:NVMM), width={width}, height={height}, framerate={fps}/1 ! "
-        f"nvvidconv flip-method={flip} ! "
-        "video/x-raw, format=BGRx ! "
-        "videoconvert ! video/x-raw, format=BGR ! "
-        "appsink drop=1 sync=false"
-    )
+import os, runpy
+import torch
 
-CSI_W = int(os.getenv("CSI_W", "1280"))
-CSI_H = int(os.getenv("CSI_H", "720"))
-CSI_FPS = int(os.getenv("CSI_FPS", "30"))
-CSI_FLIP = int(os.getenv("CSI_FLIP", "0"))
-FORCE_INDEX = int(os.getenv("FORCE_INDEX", "0"))
+# --- Patch torch.hub.load để tương thích nhiều bản YOLOv5 (path/weights) ---
+_real_hub_load = torch.hub.load
 
-_real = cv2.VideoCapture
+def hub_load_compat(repo_or_dir, model, *args, **kwargs):
+    # Ép dùng yolov5 local để khỏi lấy nhầm torch hub cache
+    if repo_or_dir == "yolov5":
+        repo_or_dir = "./yolov5"
+    kwargs["source"] = "local"
 
-def patched_VideoCapture(*args, **kwargs):
-    # patch cả 0 và 1 để khỏi lệch repo
-    if len(args) >= 1 and str(args[0]) in ("0", "1"):
-        gst = gstreamer_pipeline(CSI_W, CSI_H, CSI_FPS, CSI_FLIP)
-        return _real(gst, cv2.CAP_GSTREAMER)
-    return _real(*args, **kwargs)
+    try:
+        return _real_hub_load(repo_or_dir, model, *args, **kwargs)
+    except TypeError as e:
+        msg = str(e)
 
-cv2.VideoCapture = patched_VideoCapture
+        # Case 1: custom() không nhận path= -> đổi sang weights=
+        if "unexpected keyword argument 'path'" in msg and "path" in kwargs:
+            kwargs["weights"] = kwargs.pop("path")
+            return _real_hub_load(repo_or_dir, model, *args, **kwargs)
 
-print(f"[csi.py] CSI {CSI_W}x{CSI_H}@{CSI_FPS} flip={CSI_FLIP}")
+        # Case 2: custom() không nhận weights= -> đổi sang path=
+        if "unexpected keyword argument 'weights'" in msg and "weights" in kwargs:
+            kwargs["path"] = kwargs.pop("weights")
+            return _real_hub_load(repo_or_dir, model, *args, **kwargs)
+
+        raise
+
+torch.hub.load = hub_load_compat
+# --- end patch ---
+
 runpy.run_path("webcam.py", run_name="__main__")
-
