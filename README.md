@@ -76,8 +76,25 @@ sudo usermod -aG docker $USER
 newgrp docker
 docker --version
 docker compose version
-
-
-
 docker build --no-cache -t iot-license-plate-recognition:jetson-lpr .
+```
+
+## Chạy Dự đoán
+
+```bash
+#(Nếu có HDMI) bật quyền hiển thị cửa sổ - Trên Jetson (ngoài docker):
+xhost +local:docker
+python3 rtsp.py "rtsp://192.168.50.2:8554/mac"
+
+
+docker run --rm -it \
+  --runtime nvidia --network host \
+  -e DISPLAY=$DISPLAY -e QT_X11_NO_MITSHM=1 \
+  -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
+  -v /tmp/argus_socket:/tmp/argus_socket \
+  -v "$PWD":/workspace -w /workspace \
+  --device /dev/video0 \
+  iot-license-plate-recognition:jetson-lpr \
+  python3 csi.py
+  
 ```
