@@ -1,24 +1,16 @@
-# Dockerfile.trungdinh22
-# Base này hợp JetPack 4.6.x / L4T R32.7.x và có sẵn môi trường ngon cho Jetson
-FROM nvcr.io/nvidia/l4t-pytorch:r32.7.1-pth1.10-py3
+
+FROM dustynv/jetson-inference:r32.7.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 WORKDIR /workspace
 
-# remove broken kitware repo (missing GPG key) - HARD CLEAN
-RUN set -eux; \
-    rm -f /etc/apt/sources.list.d/*kitware* || true; \
-    sed -i '/apt.kitware.com/d' /etc/apt/sources.list || true; \
-    for f in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
-      [ -f "$f" ] && sed -i '/apt.kitware.com/d' "$f" || true; \
-    done
 
-
-# Cài OpenCV bằng apt cho chắc (đỡ fail opencv-python trên ARM)
-# + GStreamer + libs GUI để cv2.imshow chạy được khi có HDMI
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git nano curl ca-certificates \
     python3-opencv \
+    python3-pip python3-dev \
+    build-essential cmake \
+    protobuf-compiler libprotobuf-dev \
     libglib2.0-0 libsm6 libxext6 libxrender1 \
     gstreamer1.0-tools \
     gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
@@ -26,6 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gstreamer1.0-libav \
     x11-apps \
  && rm -rf /var/lib/apt/lists/*
+
+
 
 RUN python3 -m pip install --upgrade pip setuptools wheel
 
