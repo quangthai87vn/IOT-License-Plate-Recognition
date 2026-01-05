@@ -76,4 +76,7 @@ sudo usermod -aG docker $USER
 newgrp docker
 docker --version
 docker compose version
+
+
+docker build -t iot-license-plate-recognition:jetson-lpr.
 ```

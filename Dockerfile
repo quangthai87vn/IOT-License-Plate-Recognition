@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN python3 -m pip install --upgrade pip setuptools wheel
 
 # Cài requirements riêng cho repo trungdinh22 (KHÔNG cài lại torch/torchvision/opencv-python)
-COPY requirements-trungdinh22.txt /tmp/requirements-trungdinh22.txt
-RUN python3 -m pip install --no-cache-dir -r /tmp/requirements-trungdinh22.txt
+COPY requirements.txt /tmp/requirements.txt
+RUN python3 -m pip install --no-cache-dir -r /tmp/requirements.txt
 
 CMD ["bash"]
