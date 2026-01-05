@@ -78,5 +78,5 @@ docker --version
 docker compose version
 
 
-docker build -t iot-license-plate-recognition:jetson-lpr.
+docker build -t iot-license-plate-recognition:jetson-lpr .
 ```
