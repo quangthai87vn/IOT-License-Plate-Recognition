@@ -9,5 +9,4 @@ requests
 scipy
 imutils
 IPython
-opencv-python==4.1.2
 onnx==1.10.2
