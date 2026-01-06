@@ -10,8 +10,27 @@ import argparse
 import function.helper as helper
 
 
-# load model
-yolo_LP_detect = torch.hub.load('yolov5', 'custom', path='model/LP_detector_nano_61.pt', force_reload=True, source='local')
+
+
+def load_yolov5_custom(weights_path):
+    repo = "./yolov5"
+    try:
+        return torch.hub.load(repo, "custom", path=weights_path, source="local")
+    except TypeError:
+        return torch.hub.load(repo, "custom", weights=weights_path, source="local")
+
+# load model từ Macbook
+# yolo_LP_detect = torch.hub.load('yolov5', 'custom', path='model/LP_detector_nano_61.pt', force_reload=True, source='local')
+
+# load model từ Jetson Nano
+#yolo_LP_detect = torch.hub.load('./yolov5', 'custom',
+#                                weights='model/LP_detector_nano_61.pt',
+#                                source='local')
+
+
+yolo_LP_detect = load_yolov5_custom("model/LP_detector_nano_61.pt")
+
+
 yolo_license_plate = torch.hub.load('yolov5', 'custom', path='model/LP_ocr_nano_62.pt', force_reload=True, source='local')
 yolo_license_plate.conf = 0.60
 
