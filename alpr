@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -e
+
+MODE="${1:-}"
+RTSP_URL_ARG="${2:-}"
+
+IMAGE="iot-license-plate-recognition:jetson-lpr"
+NAME="alpr_runner"
+WORKDIR="/workspace"
+HOST_PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+usage() {
+  echo "Usage:"
+  echo "  ./alpr csi"
+  echo "  ./alpr rtsp rtsp://user:pass@ip:port/stream"
+  echo "  RTSP_URL=rtsp://... ./alpr rtsp"
+  exit 1
+}
+
+if [[ -z "$MODE" ]]; then
+  usage
+fi
+
+if [[ "$MODE" != "csi" && "$MODE" != "rtsp" ]]; then
+  echo "[ERR] MODE must be: csi | rtsp"
+  usage
+fi
+
+# --------- Clear / Restart (host) ----------
+echo "[INFO] Clearing old gstreamer processes..."
+sudo pkill -f gst-launch || true
+sudo pkill -f nvarguscamerasrc || true
+sudo pkill -f argus_camera || true
+
+if [[ "$MODE" == "csi" ]]; then
+  echo "[INFO] Restarting nvargus-daemon (CSI only)..."
+  sudo systemctl restart nvargus-daemon || true
+  sleep 1
+fi
+
+# --------- X11 (host) ----------
+echo "[INFO] DISPLAY=${DISPLAY:-<empty>}"
+export DISPLAY="${DISPLAY:-:0}"
+xhost +local:docker >/dev/null 2>&1 || true
+xhost +local: >/dev/null 2>&1 || true
+
+# --------- RTSP URL ----------
+RTSP_URL="${RTSP_URL_ARG:-${RTSP_URL:-}}"
+if [[ "$MODE" == "rtsp" && -z "$RTSP_URL" ]]; then
+  echo "[ERR] Missing RTSP URL."
+  echo "Example:"
+  echo "  ./alpr rtsp rtsp://192.168.50.2:8554/mac"
+  echo "  or: RTSP_URL=rtsp://... ./alpr rtsp"
+  exit 1
+fi
+
+# --------- Cleanup container name conflict ----------
+if docker ps -a --format '{{.Names}}' | grep -q "^${NAME}$"; then
+  docker rm -f "${NAME}" >/dev/null 2>&1 || true
+fi
+
+# --------- Inner command ----------
+if [[ "$MODE" == "csi" ]]; then
+  INNER_CMD="python3 csi.py"
+else
+  INNER_CMD="RTSP_URL='${RTSP_URL}' python3 rtsp.py"
+fi
+
+echo "[INFO] Running docker => ${IMAGE}"
+echo "[INFO] Project mount => ${HOST_PROJECT_DIR}:${WORKDIR}"
+echo "[INFO] Mode => ${MODE}"
+[[ "$MODE" == "rtsp" ]] && echo "[INFO] RTSP_URL => ${RTSP_URL}"
+
+# --------- Run container and execute ----------
+docker run --rm -it \
+  --name "${NAME}" \
+  --runtime nvidia \
+  --network host \
+  --ipc=host \
+  --privileged \
+  -e DISPLAY="${DISPLAY}" \
+  -e QT_X11_NO_MITSHM=1 \
+  -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
+  -v /tmp/argus_socket:/tmp/argus_socket \
+  -v /dev:/dev \
+  -v "${HOST_PROJECT_DIR}:${WORKDIR}" \
+  -w "${WORKDIR}" \
+  "${IMAGE}" \
+  bash -lc "${INNER_CMD}"
