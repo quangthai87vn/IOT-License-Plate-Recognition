@@ -66,7 +66,6 @@ Use code in ./training folder
 
 
 ## Cài Docker (nếu máy chưa có)
-
 ```bash
 #Jetson thường cài sẵn/hoặc cài nhanh:
 
@@ -109,11 +108,7 @@ docker run --rm -it \
   RTSP_URL="rtsp://192.168.50.2:8554/mac" python3 rtsp.py 
   CSI_FPS=30 CSI_W=1280 CSI_H=720 SKIP=1 python3 csi.py
 ```
-
-
-
 ## Test CSI pipeline trong container trước khi chạy YOLO - Trong container chạy:
-
 ```bash
 gst-launch-1.0 nvarguscamerasrc sensor-id=0 ! \
 "video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1" ! \
@@ -140,22 +135,6 @@ python export.py --weights ../model/LP_ocr_nano_62.pt --img 640 --batch 1 --incl
 
 
 ```
-
-Check OpenCV DNN có dùng CUDA không
-
-python3 -c "import cv2; print('CUDA devices:', getattr(cv2.cuda,'getCudaEnabledDeviceCount',lambda:0)())"
-python3 -c "import cv2; print(cv2.getBuildInformation())" | grep -i -E "cuda|cudnn|opencv dnn"
-
-
-
-/usr/src/tensorrt/bin/trtexec \
-  --onnx=./model/LP_detector_nano_61.onnx \
-  --saveEngine=./model/LP_detector_nano_61_fp16.engine \
-  --fp16 \
-  --workspace=1024 \
-  --timingCacheFile=./model/trt_cache.bin
-
-
 # Build TensorRT engine cho OCR ONNX
 ```bash
 sudo nvpmodel -m 0
