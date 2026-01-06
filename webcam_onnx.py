@@ -3,7 +3,6 @@ import time
 import math
 import argparse
 from typing import List, Tuple
-
 import cv2
 import numpy as np
 
