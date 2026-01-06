@@ -140,5 +140,5 @@ fakesink -v
 rsync -av --delete \
   --exclude ".git" --exclude "__pycache__" --exclude ".venv" \
   ./ \
-  mtl@<192.168.50.1>:~/IOT/IOT-License-Plate-Recognition/
+  mtl@192.168.50.1:~/IOT/IOT-License-Plate-Recognition/
 ```
