@@ -1,237 +1,287 @@
-import os
-import time
-import numpy as np
+# webcam_onnx.py
+import os, time
 import cv2
+import numpy as np
 
-SRC = os.getenv("SRC", "csi")                 # csi | rtsp
-RTSP_URL = os.getenv("RTSP_URL", "")
-RTSP_CODEC = os.getenv("RTSP_CODEC", "h264")
-RTSP_LATENCY = int(os.getenv("RTSP_LATENCY", "0"))
-
-CAM_W = int(os.getenv("CAM_W", "1280"))
-CAM_H = int(os.getenv("CAM_H", "720"))
-CAM_FPS = int(os.getenv("CAM_FPS", "30"))
-SENSOR_MODE = int(os.getenv("SENSOR_MODE", "3"))
-FLIP = int(os.getenv("FLIP", "0"))
-
-IMG_SIZE = int(os.getenv("IMG_SIZE", "640"))
+# =========================
+# Config via ENV
+# =========================
+SRC        = os.getenv("SRC", "csi")          # csi | rtsp | usb
+SHOW       = os.getenv("SHOW", "1") == "1"    # 1: imshow, 0: no window (ssh headless)
+IMG_SIZE   = int(os.getenv("IMG_SIZE", "640"))
 CONF_THRES = float(os.getenv("CONF", "0.25"))
-IOU_THRES = float(os.getenv("IOU", "0.45"))
+IOU_THRES  = float(os.getenv("IOU", "0.45"))
+SKIP       = int(os.getenv("SKIP", "0"))      # 0: process every frame, 1: skip 1 frame, etc.
 
-ONNX_WEIGHTS = os.getenv("ONNX_WEIGHTS", "./model/LP_detector_nano_61.onnx")
+# CSI
+CSI_W      = int(os.getenv("CSI_W", "1280"))
+CSI_H      = int(os.getenv("CSI_H", "720"))
+CSI_FPS    = int(os.getenv("CSI_FPS", "30"))
+CSI_FLIP   = int(os.getenv("CSI_FLIP", "0"))
+CSI_MODE   = os.getenv("CSI_MODE", "")        # e.g. "4" or "2" ... optional
 
-SHOW = (os.getenv("SHOW", "1") == "1") and bool(os.environ.get("DISPLAY", ""))
-WINDOW_NAME = os.getenv("WINDOW", "CSI-ONNX" if SRC == "csi" else "RTSP-ONNX")
+# RTSP
+RTSP_URL     = os.getenv("RTSP_URL", "")
+RTSP_LATENCY = int(os.getenv("RTSP_LATENCY", "200"))
 
+# Models
+DET_ONNX = os.getenv("DET_ONNX", "./model/LP_detector_nano_61.onnx")
+OCR_ONNX = os.getenv("OCR_ONNX", "./model/LP_ocr_nano_62.onnx")
 
-def csi_pipeline(sensor_id=0, sensor_mode=3, w=1280, h=720, fps=30, flip=0):
-    return (
-        f"nvarguscamerasrc sensor-id={sensor_id} sensor-mode={sensor_mode} ! "
-        f"video/x-raw(memory:NVMM), width=(int){w}, height=(int){h}, framerate=(fraction){fps}/1 ! "
-        f"nvvidconv flip-method={flip} ! "
-        f"video/x-raw, format=(string)BGRx ! videoconvert ! "
-        f"video/x-raw, format=(string)BGR ! "
-        f"appsink drop=1 max-buffers=1 sync=false"
-    )
+# OCR classes (default: 0-9 + A-Z)
+DEFAULT_CLASSES = list("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 
-
-def rtsp_pipeline(url, codec="h264", latency=0):
-    codec = codec.lower().strip()
-    depay = "rtph264depay" if codec == "h264" else "rtph265depay"
-    parse = "h264parse" if codec == "h264" else "h265parse"
-    return (
-        f"rtspsrc location={url} latency={latency} drop-on-latency=true ! "
-        f"{depay} ! {parse} ! nvv4l2decoder ! "
-        f"nvvidconv ! video/x-raw, format=BGRx ! videoconvert ! "
-        f"video/x-raw, format=BGR ! "
-        f"appsink drop=1 max-buffers=1 sync=false"
-    )
-
-
-def letterbox(im, new_shape=640, color=(114, 114, 114)):
+# =========================
+# Utils: letterbox + NMS + scale
+# =========================
+def letterbox(im, new_shape=640, color=(114,114,114)):
     h, w = im.shape[:2]
     if isinstance(new_shape, int):
         new_shape = (new_shape, new_shape)
-
     r = min(new_shape[0] / h, new_shape[1] / w)
-    nw, nh = int(round(w * r)), int(round(h * r))
-    dw, dh = new_shape[1] - nw, new_shape[0] - nh
-    dw /= 2
-    dh /= 2
-
-    im = cv2.resize(im, (nw, nh), interpolation=cv2.INTER_LINEAR)
-    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
-    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
-    im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
-    return im, r, (left, top)
-
+    nh, nw = int(round(h * r)), int(round(w * r))
+    im_resized = cv2.resize(im, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    pad_w, pad_h = new_shape[1] - nw, new_shape[0] - nh
+    top = pad_h // 2
+    bottom = pad_h - top
+    left = pad_w // 2
+    right = pad_w - left
+    im_padded = cv2.copyMakeBorder(im_resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+    return im_padded, r, (left, top)
 
 def xywh2xyxy(x):
-    y = np.copy(x)
-    y[..., 0] = x[..., 0] - x[..., 2] / 2
-    y[..., 1] = x[..., 1] - x[..., 3] / 2
-    y[..., 2] = x[..., 0] + x[..., 2] / 2
-    y[..., 3] = x[..., 1] + x[..., 3] / 2
+    # x: [cx,cy,w,h]
+    y = np.zeros_like(x)
+    y[:,0] = x[:,0] - x[:,2]/2
+    y[:,1] = x[:,1] - x[:,3]/2
+    y[:,2] = x[:,0] + x[:,2]/2
+    y[:,3] = x[:,1] + x[:,3]/2
     return y
 
+def scale_coords(coords, r, pad, original_shape):
+    # coords: Nx4 in padded space -> original frame
+    coords[:, [0,2]] -= pad[0]
+    coords[:, [1,3]] -= pad[1]
+    coords[:, :4] /= r
+    # clip
+    h, w = original_shape[:2]
+    coords[:,0] = np.clip(coords[:,0], 0, w-1)
+    coords[:,2] = np.clip(coords[:,2], 0, w-1)
+    coords[:,1] = np.clip(coords[:,1], 0, h-1)
+    coords[:,3] = np.clip(coords[:,3], 0, h-1)
+    return coords
 
-def nms_numpy(boxes, scores, iou_thres=0.45):
-    if len(boxes) == 0:
-        return []
+def yolo_onnx_infer(net, frame_bgr, img_size, conf_thres, iou_thres, force_single_class=False):
+    img, r, pad = letterbox(frame_bgr, img_size)
+    blob = cv2.dnn.blobFromImage(img, 1/255.0, (img_size, img_size), swapRB=True, crop=False)
+    net.setInput(blob)
+    out = net.forward()
 
-    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-    areas = (x2 - x1 + 1) * (y2 - y1 + 1)
-    order = scores.argsort()[::-1]
+    # YOLOv5 ONNX usually: (1,25200,5+nc)
+    out = np.squeeze(out, axis=0)  # (25200, no)
+    if out.ndim != 2 or out.shape[1] < 6:
+        return [], [], []
 
-    keep = []
-    while order.size > 0:
-        i = order[0]
-        keep.append(i)
-        if order.size == 1:
-            break
-        xx1 = np.maximum(x1[i], x1[order[1:]])
-        yy1 = np.maximum(y1[i], y1[order[1:]])
-        xx2 = np.minimum(x2[i], x2[order[1:]])
-        yy2 = np.minimum(y2[i], y2[order[1:]])
+    boxes = out[:, 0:4]  # cx,cy,w,h
+    obj   = out[:, 4:5]  # objectness
+    cls   = out[:, 5:]   # class scores
 
-        w = np.maximum(0.0, xx2 - xx1 + 1)
-        h = np.maximum(0.0, yy2 - yy1 + 1)
-        inter = w * h
-        iou = inter / (areas[i] + areas[order[1:]] - inter + 1e-9)
+    if cls.shape[1] == 1 or force_single_class:
+        scores = (obj * cls[:, 0:1]).squeeze(1)
+        class_ids = np.zeros_like(scores, dtype=np.int32)
+    else:
+        class_ids = np.argmax(cls, axis=1).astype(np.int32)
+        scores = (obj.squeeze(1) * cls[np.arange(cls.shape[0]), class_ids])
 
-        inds = np.where(iou <= iou_thres)[0]
-        order = order[inds + 1]
-    return keep
+    mask = scores > conf_thres
+    boxes = boxes[mask]
+    scores = scores[mask]
+    class_ids = class_ids[mask]
+    if len(scores) == 0:
+        return [], [], []
 
+    boxes_xyxy = xywh2xyxy(boxes)
+    boxes_xyxy = scale_coords(boxes_xyxy, r, pad, frame_bgr.shape)
 
-def postprocess_yolo(pred, conf_thres=0.25, iou_thres=0.45):
-    pred = np.array(pred)
-    # OpenCV dnn.forward() hay ra shape (1,25200,85) hoặc (1,25200,6)
-    if pred.ndim == 3:
-        pred = pred[0]
+    # NMS
+    b = boxes_xyxy.astype(np.float32)
+    x = b[:,0]; y = b[:,1]; w = (b[:,2]-b[:,0]); h = (b[:,3]-b[:,1])
+    nms_boxes = [[float(x[i]), float(y[i]), float(w[i]), float(h[i])] for i in range(len(scores))]
+    idxs = cv2.dnn.NMSBoxes(nms_boxes, scores.tolist(), conf_thres, iou_thres)
+    if len(idxs) == 0:
+        return [], [], []
+    idxs = idxs.flatten().tolist()
 
-    if pred.shape[1] == 6:
-        xywh = pred[:, 0:4]
-        conf = pred[:, 4]
-        cls = pred[:, 5]
-        m = conf >= conf_thres
-        xywh, conf, cls = xywh[m], conf[m], cls[m]
-        boxes = xywh2xyxy(xywh)
-        keep = nms_numpy(boxes, conf, iou_thres)
-        return np.column_stack([boxes[keep], conf[keep], cls[keep]])
+    final_boxes = b[idxs].astype(int)
+    final_scores = scores[idxs]
+    final_cls = class_ids[idxs]
+    return final_boxes, final_scores, final_cls
 
-    xywh = pred[:, 0:4]
-    obj = pred[:, 4:5]
-    cls_scores = pred[:, 5:]
-    cls = np.argmax(cls_scores, axis=1)
-    cls_conf = np.max(cls_scores, axis=1, keepdims=True)
-    conf = (obj * cls_conf).squeeze(1)
+def decode_plate(chars_boxes, chars_scores, chars_cls, classes):
+    """
+    chars_boxes: Nx4 (x1,y1,x2,y2) on cropped plate image
+    decode by 2-line split via y-center
+    """
+    if len(chars_boxes) == 0:
+        return ""
 
-    m = conf >= conf_thres
-    xywh, conf, cls = xywh[m], conf[m], cls[m]
-    boxes = xywh2xyxy(xywh)
-    keep = nms_numpy(boxes, conf, iou_thres)
-    return np.column_stack([boxes[keep], conf[keep], cls[keep]])
+    items = []
+    for (x1,y1,x2,y2), cid, sc in zip(chars_boxes, chars_cls, chars_scores):
+        cx = (x1+x2)/2
+        cy = (y1+y2)/2
+        ch = classes[int(cid)] if int(cid) < len(classes) else "?"
+        items.append((cx, cy, ch, sc))
 
+    # split into 1 or 2 lines
+    ys = np.array([it[1] for it in items])
+    y_med = float(np.median(ys))
 
-def scale_boxes(boxes_xyxy, r, pad, orig_shape):
-    boxes = boxes_xyxy.copy()
-    boxes[:, [0, 2]] -= pad[0]
-    boxes[:, [1, 3]] -= pad[1]
-    boxes[:, :4] /= r
-    h0, w0 = orig_shape[:2]
-    boxes[:, 0] = np.clip(boxes[:, 0], 0, w0 - 1)
-    boxes[:, 2] = np.clip(boxes[:, 2], 0, w0 - 1)
-    boxes[:, 1] = np.clip(boxes[:, 1], 0, h0 - 1)
-    boxes[:, 3] = np.clip(boxes[:, 3], 0, h0 - 1)
-    return boxes
+    top = [it for it in items if it[1] <= y_med]
+    bot = [it for it in items if it[1] >  y_med]
 
+    top.sort(key=lambda x: x[0])
+    bot.sort(key=lambda x: x[0])
 
-def main():
-    print(f"[INFO] SRC={SRC} SHOW={SHOW} IMG_SIZE={IMG_SIZE} CONF={CONF_THRES} IOU={IOU_THRES}")
-    print(f"[INFO] ONNX_WEIGHTS={ONNX_WEIGHTS}")
+    line1 = "".join([it[2] for it in top]).strip()
+    line2 = "".join([it[2] for it in bot]).strip()
 
-    # Open camera
+    if line2:
+        return f"{line1}-{line2}"
+    return line1
+
+# =========================
+# Camera pipelines
+# =========================
+def gst_csi_pipeline(width, height, fps, flip, sensor_mode=""):
+    sm = f" sensor-mode={sensor_mode} " if str(sensor_mode).strip() != "" else " "
+    return (
+        f"nvarguscamerasrc{sm} ! "
+        f"video/x-raw(memory:NVMM), width={width}, height={height}, framerate={fps}/1 ! "
+        f"nvvidconv flip-method={flip} ! "
+        f"video/x-raw, format=BGRx ! videoconvert ! "
+        f"video/x-raw, format=BGR ! appsink drop=1 sync=false"
+    )
+
+def gst_rtsp_pipeline(url, latency=200):
+    # Jetson decode H264 via nvv4l2decoder
+    return (
+        f"rtspsrc location={url} latency={latency} ! "
+        f"rtph264depay ! h264parse ! nvv4l2decoder ! "
+        f"nvvidconv ! video/x-raw, format=BGRx ! videoconvert ! "
+        f"video/x-raw, format=BGR ! appsink drop=1 sync=false"
+    )
+
+def open_capture():
+    if SRC == "csi":
+        pipe = gst_csi_pipeline(CSI_W, CSI_H, CSI_FPS, CSI_FLIP, CSI_MODE)
+        cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
+        return cap
     if SRC == "rtsp":
         if not RTSP_URL:
-            raise SystemExit("Thiếu RTSP_URL")
-        pipeline = rtsp_pipeline(RTSP_URL, codec=RTSP_CODEC, latency=RTSP_LATENCY)
-    else:
-        pipeline = csi_pipeline(sensor_id=0, sensor_mode=SENSOR_MODE, w=CAM_W, h=CAM_H, fps=CAM_FPS, flip=FLIP)
+            raise RuntimeError("SRC=rtsp nhưng thiếu RTSP_URL")
+        pipe = gst_rtsp_pipeline(RTSP_URL, RTSP_LATENCY)
+        cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
+        if not cap.isOpened():
+            # fallback direct
+            cap = cv2.VideoCapture(RTSP_URL)
+        return cap
+    # usb
+    cam_index = int(os.getenv("CAM_INDEX", "0"))
+    return cv2.VideoCapture(cam_index)
 
-    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-    if not cap.isOpened():
-        raise SystemExit("[ERROR] Không mở được camera")
-    print("[OK] Camera opened")
-
-    if not os.path.exists(ONNX_WEIGHTS):
-        raise SystemExit(f"[ERROR] Không thấy ONNX: {ONNX_WEIGHTS}")
-
-    # Load ONNX via OpenCV DNN
-    net = cv2.dnn.readNetFromONNX(ONNX_WEIGHTS)
-
-    # Nếu OpenCV build có CUDA thì bật (không có cũng chạy bình thường)
+# =========================
+# Load ONNX nets
+# =========================
+def load_net(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Không thấy file: {path}")
+    net = cv2.dnn.readNetFromONNX(path)
+    # Try CUDA if OpenCV has it
     try:
         net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
         net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA_FP16)
-        print("[OK] OpenCV DNN CUDA FP16 enabled")
     except Exception:
-        print("[WARN] OpenCV DNN không có CUDA, chạy CPU")
+        net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
+        net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+    return net
 
-    if SHOW:
-        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+def main():
+    print(f"[INFO] SRC={SRC} SHOW={SHOW} IMG_SIZE={IMG_SIZE} CONF={CONF_THRES} IOU={IOU_THRES} SKIP={SKIP}")
+    print(f"[INFO] DET_ONNX={DET_ONNX}")
+    print(f"[INFO] OCR_ONNX={OCR_ONNX}")
 
-    t_last = time.time()
+    det_net = load_net(DET_ONNX)
+    ocr_net = load_net(OCR_ONNX)
+
+    cap = open_capture()
+    if not cap.isOpened():
+        raise RuntimeError("Không mở được camera/stream. Check pipeline hoặc quyền /dev/video* / RTSP.")
+
+    classes = DEFAULT_CLASSES
+
+    t0 = time.time()
     fps_smooth = 0.0
+    frame_id = 0
 
     while True:
-        ret, frame = cap.read()
-        if not ret or frame is None:
-            time.sleep(0.01)
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            print("[WARN] frame None / stream ended")
+            break
+
+        frame_id += 1
+        if SKIP > 0 and (frame_id % (SKIP+1) != 0):
+            if SHOW:
+                cv2.imshow(f"{SRC.upper()}-ONNX", frame)
+                if cv2.waitKey(1) & 0xFF == 27:
+                    break
             continue
 
-        orig = frame
-        img, r, pad = letterbox(orig, IMG_SIZE)
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        blob = cv2.dnn.blobFromImage(rgb, 1/255.0, (IMG_SIZE, IMG_SIZE), swapRB=False, crop=False)
+        t1 = time.time()
 
-        net.setInput(blob)
-        pred = net.forward()  # (1,25200,dim)
+        # 1) Detect plate(s)
+        plate_boxes, plate_scores, _ = yolo_onnx_infer(det_net, frame, IMG_SIZE, CONF_THRES, IOU_THRES, force_single_class=True)
 
-        det = postprocess_yolo(pred, CONF_THRES, IOU_THRES)
-        det_count = 0
+        plate_texts = []
+        for (x1,y1,x2,y2), psc in zip(plate_boxes, plate_scores):
+            # pad crop
+            pad = 8
+            x1c = max(0, x1-pad); y1c = max(0, y1-pad)
+            x2c = min(frame.shape[1]-1, x2+pad); y2c = min(frame.shape[0]-1, y2+pad)
 
-        if det is not None and len(det) > 0:
-            det = det.astype(np.float32)
-            boxes = scale_boxes(det[:, :4], r, pad, orig.shape)
-            scores = det[:, 4]
-            clss = det[:, 5]
-            det_count = len(boxes)
+            crop = frame[y1c:y2c, x1c:x2c]
+            if crop.size == 0:
+                continue
 
-            for (x1, y1, x2, y2), sc, c in zip(boxes, scores, clss):
-                x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-                cv2.rectangle(orig, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(orig, f"{int(c)} {sc:.2f}", (x1, max(0, y1-5)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            # 2) OCR on crop (characters)
+            ch_boxes, ch_scores, ch_cls = yolo_onnx_infer(ocr_net, crop, IMG_SIZE, conf_thres=0.25, iou_thres=0.45, force_single_class=False)
+            text = decode_plate(ch_boxes, ch_scores, ch_cls, classes)
+            plate_texts.append((x1,y1,x2,y2, float(psc), text))
 
-        now = time.time()
-        dt = now - t_last
-        t_last = now
-        fps = 1.0 / dt if dt > 0 else 0.0
-        fps_smooth = fps_smooth * 0.9 + fps * 0.1 if fps_smooth > 0 else fps
+            # draw plate box
+            cv2.rectangle(frame, (x1,y1), (x2,y2), (0,255,0), 2)
+            label = text if text else f"plate {psc:.2f}"
+            cv2.putText(frame, label, (x1, max(0,y1-8)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2, cv2.LINE_AA)
 
-        print(f"FPS ~ {fps_smooth:.1f}, det={det_count}")
+        # FPS
+        dt = time.time() - t1
+        inst_fps = 1.0 / max(dt, 1e-6)
+        fps_smooth = 0.9*fps_smooth + 0.1*inst_fps
+
+        cv2.putText(frame, f"FPS {fps_smooth:.1f} plates={len(plate_boxes)}",
+                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2, cv2.LINE_AA)
 
         if SHOW:
-            cv2.imshow(WINDOW_NAME, orig)
-            k = cv2.waitKey(1) & 0xFF
-            if k == 27 or k == ord("q"):
+            cv2.imshow(f"{SRC.upper()}-ONNX", frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:  # ESC
                 break
 
     cap.release()
     if SHOW:
         cv2.destroyAllWindows()
-
+    print("[DONE]")
 
 if __name__ == "__main__":
     main()
