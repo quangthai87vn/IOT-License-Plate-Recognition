@@ -1,14 +1,30 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 import os
-import runpy
+import subprocess
+import sys
 
-# Force CSI mode
-os.environ["SRC"] = "csi"
+def sh(cmd):
+    return subprocess.call(cmd, shell=True)
 
-# Optional defaults (you can override when running)
-# os.environ["CSI_FPS"] = "30"
-# os.environ["CSI_MODE"] = "3"
-# os.environ["OUT_W"] = "1280"
-# os.environ["OUT_H"] = "720"
-# os.environ["SHOW"] = "1"
+if __name__ == "__main__":
+    # ÉP CSI mượt: mode 3 @30fps (đỡ giật hơn mode 5 @120fps)
+    os.environ.setdefault("SRC", "csi")
+    os.environ.setdefault("CSI_SENSOR_ID", "0")
+    os.environ.setdefault("CSI_SENSOR_MODE", "3")
+    os.environ.setdefault("CSI_W", "1280")
+    os.environ.setdefault("CSI_H", "720")
+    os.environ.setdefault("CSI_FPS", "30")
+    os.environ.setdefault("OCR_EVERY", "3")     # giảm tải OCR
+    os.environ.setdefault("IMG_SIZE", "640")    # giảm xuống 416 nếu muốn mượt hơn
+    os.environ.setdefault("OCR_SIZE", "320")
+    os.environ.setdefault("SHOW", "1")
 
-runpy.run_path("webcam_onnx.py", run_name="__main__")
+    # optional: cleanup Argus nếu hay bị kẹt camera
+    if os.getenv("RESET_ARGUS", "0") == "1":
+        sh("pkill -f gst-launch || true")
+        sh("sudo systemctl restart nvargus-daemon || true")
+
+    from webcam_onnx import main
+    sys.exit(main() or 0)
