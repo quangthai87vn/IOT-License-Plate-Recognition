@@ -178,3 +178,17 @@ python3 -c "import cv2; print(cv2.getBuildInformation())" | grep -i -E "cuda|cud
   --onnx=./model/LP_ocr_nano_62.onnx \
   --saveEngine=./model/LP_ocr_nano_62_fp16.engine \
   --fp16 --workspace=256
+
+  /usr/src/tensorrt/bin/trtexec \
+  --onnx=./model/LP_detector_nano_61.onnx \
+  --saveEngine=./model/LP_detector_nano_61_fp16.engine \
+  --fp16 \
+  --workspace=1024 \
+  --timingCacheFile=./model/trt_cache.bin
+
+  /usr/src/tensorrt/bin/trtexec \
+  --onnx=./model/LP_ocr_nano_62.onnx \
+  --saveEngine=./model/LP_ocr_nano_62_fp16.engine \
+  --fp16 \
+  --workspace=1024 \
+  --timingCacheFile=./model/trt_cache.bin
