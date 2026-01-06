@@ -68,7 +68,7 @@ def main():
         print("Pipeline:", pipeline)
         return
 
-    print("✅ CSI camera opened")
+    print("CSI camera opened")
 
     lp_det, lp_ocr = load_models()
     t0 = time.time()
