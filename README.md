@@ -106,7 +106,7 @@ docker run --rm -it \
   iot-license-plate-recognition:jetson-lpr \
   bash
   RTSP_URL="rtsp://192.168.50.2:8554/mac" python3 rtsp.py 
-  CSI_FPS=30 CSI_W=1280 CSI_H=720 SKIP=1 python3 csi.py
+  python3 csi.py
 ```
 ## Test CSI pipeline trong container trước khi chạy YOLO - Trong container chạy:
 ```bash
