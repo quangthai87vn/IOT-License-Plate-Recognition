@@ -259,10 +259,23 @@ def main():
             plate_texts.append((x1,y1,x2,y2, float(psc), text))
 
             # draw plate box
-            cv2.rectangle(frame, (x1,y1), (x2,y2), (0,255,0), 2)
+            # --- overlay đỏ trong bbox (semi-transparent)
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), -1)  # đỏ (BGR)
+            alpha = 0.22  # 0.15~0.35 tuỳ thích
+            frame = cv2.addWeighted(overlay, alpha, frame, 1 - alpha, 0)
+
+            # --- viền xanh mỏng
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 1)
+
+            # --- text đỏ
             label = text if text else f"plate {psc:.2f}"
-            cv2.putText(frame, label, (x1, max(0,y1-8)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2, cv2.LINE_AA)
+            cv2.putText(
+                frame, label, (x1, max(0, y1 - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2, cv2.LINE_AA
+        )
+
+            
 
         # FPS
         dt = time.time() - t1
