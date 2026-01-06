@@ -174,10 +174,6 @@ python3 -c "import cv2; print('CUDA devices:', getattr(cv2.cuda,'getCudaEnabledD
 python3 -c "import cv2; print(cv2.getBuildInformation())" | grep -i -E "cuda|cudnn|opencv dnn"
 
 
-/usr/src/tensorrt/bin/trtexec \
-  --onnx=./model/LP_ocr_nano_62.onnx \
-  --saveEngine=./model/LP_ocr_nano_62_fp16.engine \
-  --fp16 --workspace=256
 
   /usr/src/tensorrt/bin/trtexec \
   --onnx=./model/LP_detector_nano_61.onnx \
