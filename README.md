@@ -134,15 +134,13 @@ nvvidconv ! "video/x-raw,format=BGRx" ! videoconvert ! \
 fakesink -v
 ```
 
-
-
 ## Chuyển file qua Jetson - rsync sync folder: Trên Mac (đứng ở thư mục project local):
 ```bash
 rsync -av --delete \
   --exclude ".git" --exclude "__pycache__" --exclude ".venv" \
   ./ \
   mtl@192.168.50.1:~/IOT/IOT-License-Plate-Recognition/
-```
+
 
 
 # Vào bên trong Docker
@@ -151,3 +149,6 @@ docker exec -it <CONTAINER_NAME_OR_ID> bash
 # Export về ONNX
 python export.py --weights ../model/LP_detector_nano_61.pt --img 640 --batch 1 --include onnx --opset 12 
 python export.py --weights ../model/LP_ocr_nano_62.pt --img 640 --batch 1 --include onnx --opset 12 
+
+
+```
