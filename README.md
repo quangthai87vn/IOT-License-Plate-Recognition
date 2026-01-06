@@ -107,6 +107,13 @@ docker run --rm -it \
   bash
   RTSP_URL="rtsp://192.168.50.2:8554/mac" python3 rtsp.py 
   python3 csi.py
+
+
+  python3 csi.py --show 1
+  python3 rtsp.py "rtsp://192.168.50.2:8554/mac" --show 1
+
+
+
 ```
 ## Test CSI pipeline trong container trước khi chạy YOLO - Trong container chạy:
 ```bash

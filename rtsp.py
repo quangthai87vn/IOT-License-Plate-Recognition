@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Run ALPR with RTSP stream.
 
-Usage:
-  RTSP_URL='rtsp://user:pass@ip:554/...' python3 rtsp.py
-
-Optional env:
-  RTSP_LATENCY=100  (ms)
-  RTSP_CODEC=h264|h265
-  SHOW=1 IMG_SIZE=640 CONF=0.25 IOU=0.45
-"""
 import os
-
-os.environ["SRC"] = "rtsp"
-
-# Allow user to pass RTSP URL as first CLI arg too
 import sys
-if len(sys.argv) >= 2 and sys.argv[1].startswith("rtsp"):
-    os.environ["RTSP_URL"] = sys.argv[1]
 
-from webcam_onnx import main
+def main():
+    # usage:
+    #   python3 rtsp.py "rtsp://user:pass@ip:554/..." 
+    # or set env RTSP_URL
+    rtsp_url = ""
+    if len(sys.argv) >= 2 and sys.argv[1].startswith("rtsp"):
+        rtsp_url = sys.argv[1]
+        rest = sys.argv[2:]
+    else:
+        rtsp_url = os.getenv("RTSP_URL", "")
+        rest = sys.argv[1:]
+
+    if not rtsp_url:
+        raise RuntimeError('Thiếu RTSP URL. Dùng: python3 rtsp.py "rtsp://..." hoặc set env RTSP_URL')
+
+    os.environ["SRC"] = "rtsp"
+    os.environ["RTSP_URL"] = rtsp_url
+    os.execvp("python3", ["python3", "webcam_onnx.py"] + rest)
 
 if __name__ == "__main__":
     main()
