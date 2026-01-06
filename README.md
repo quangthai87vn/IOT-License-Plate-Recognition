@@ -97,6 +97,13 @@ IMG_SIZE=416 SKIP=1 CSI_MODE=3 CSI_FPS=30  python3 csi.py
 
 
 
+Clear Process 
+pkill -f gst-launch
+sudo systemctl restart nvargus-daemon
+4) Run container (mount Project/) rồi mới vào chạy code
+echo $DISPLAY 
+export DISPLAY=$DISPLAY 
+xhost +local: 
 
 docker run --rm -it \
   --runtime nvidia \
