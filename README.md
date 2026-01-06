@@ -84,19 +84,10 @@ docker build --no-cache -t iot-license-plate-recognition:jetson-lpr .
 ```bash
 #(Nếu có HDMI) bật quyền hiển thị cửa sổ - Trên Jetson (ngoài docker):
 xhost +local:docker
-python3 rtsp.py RTSP_URL="rtsp://192.168.50.2:8554/mac"
-
-
-CSI_FPS=30 CSI_W=1280 CSI_H=720 SKIP=1 python3 csi.py
-
-
-
-
-
-Clear Process 
+#Clear Process 
 pkill -f gst-launch
 sudo systemctl restart nvargus-daemon
-4) Run container (mount Project/) rồi mới vào chạy code
+#Run container (mount Project/) rồi mới vào chạy code
 echo $DISPLAY 
 export DISPLAY=$DISPLAY 
 xhost +local: 
@@ -117,24 +108,9 @@ docker run --rm -it \
   bash
 
   python3 csi.py
-
-
-
-
-xhost +local:docker
-docker run --rm -it \
-  --runtime nvidia \
-  --network host \
-  -e DISPLAY=$DISPLAY \
-  -e QT_X11_NO_MITSHM=1 \
-  -e RTSP_URL="rtsp://192.168.50.2:8554/mac" \
-  -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
-  -v "$PWD":/workspace \
-  -v $HOME/IOT:/workspace/project \
-  -w /workspace/project \
-  iot-license-plate-recognition:jetson-lpr \
   python3 rtsp.py
-
+  python3 rtsp.py RTSP_URL="rtsp://192.168.50.2:8554/mac"
+  CSI_FPS=30 CSI_W=1280 CSI_H=720 SKIP=1 python3 csi.py
 ```
 
 
