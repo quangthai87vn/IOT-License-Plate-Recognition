@@ -86,13 +86,9 @@ docker build --no-cache -t iot-license-plate-recognition:jetson-lpr .
 xhost +local:docker
 python3 rtsp.py RTSP_URL="rtsp://192.168.50.2:8554/mac"
 
-RTSP_URL="rtsp://192.168.50.2:8554/mac" python3 rtsp.py
-RTSP_URL="rtsp://192.168.50.2:8554/mac" RTSP_CODEC=h264 RTSP_LATENCY=200 SHOW=1 python3 rtsp.py
 
+CSI_FPS=30 CSI_W=1280 CSI_H=720 SKIP=1 python3 csi.py
 
-
-
-IMG_SIZE=416 SKIP=1 CSI_MODE=3 CSI_FPS=30  python3 csi.py
 
 
 
