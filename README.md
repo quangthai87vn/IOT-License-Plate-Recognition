@@ -84,7 +84,7 @@ docker build --no-cache -t iot-license-plate-recognition:jetson-lpr .
 ```bash
 #(Nếu có HDMI) bật quyền hiển thị cửa sổ - Trên Jetson (ngoài docker):
 xhost +local:docker
-python3 rtsp.py "rtsp://192.168.50.2:8554/mac"
+python3 rtsp.py RTSP_URL="rtsp://192.168.50.2:8554/mac"
 
 
 docker run --rm -it \
