@@ -132,3 +132,13 @@ gst-launch-1.0 nvarguscamerasrc sensor-id=0 ! \
 nvvidconv ! "video/x-raw,format=BGRx" ! videoconvert ! \
 fakesink -v
 ```
+
+
+
+## Chuyển file qua Jetson - rsync sync folder: Trên Mac (đứng ở thư mục project local):
+```bash
+rsync -av --delete \
+  --exclude ".git" --exclude "__pycache__" --exclude ".venv" \
+  ./ \
+  mtl@<192.168.50.1>:~/IOT/IOT-License-Plate-Recognition/
+```
