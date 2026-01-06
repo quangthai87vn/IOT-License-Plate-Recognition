@@ -150,6 +150,7 @@ fakesink -v
 
 ## Chuyển file qua Jetson - rsync sync folder: Trên Mac (đứng ở thư mục project local):
 ```bash
+# Chuyển file qua Jetson - rsync sync folder: Trên Mac (đứng ở thư mục project local):
 rsync -av --delete \
   --exclude ".git" --exclude "__pycache__" --exclude ".venv" \
   ./ \
@@ -171,3 +172,9 @@ Check OpenCV DNN có dùng CUDA không
 
 python3 -c "import cv2; print('CUDA devices:', getattr(cv2.cuda,'getCudaEnabledDeviceCount',lambda:0)())"
 python3 -c "import cv2; print(cv2.getBuildInformation())" | grep -i -E "cuda|cudnn|opencv dnn"
+
+
+/usr/src/tensorrt/bin/trtexec \
+  --onnx=./model/LP_ocr_nano_62.onnx \
+  --saveEngine=./model/LP_ocr_nano_62_fp16.engine \
+  --fp16 --workspace=256
