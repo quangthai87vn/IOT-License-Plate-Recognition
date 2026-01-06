@@ -105,10 +105,10 @@ docker run --rm -it \
   -w /workspace \
   iot-license-plate-recognition:jetson-lpr \
   bash
+
+
   RTSP_URL="rtsp://192.168.50.2:8554/mac" python3 rtsp.py 
   python3 csi.py
-
-
   python3 csi.py --show 1
   python3 rtsp.py "rtsp://192.168.50.2:8554/mac" --show 1
 
