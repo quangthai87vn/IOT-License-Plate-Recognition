@@ -106,10 +106,7 @@ docker run --rm -it \
   -w /workspace \
   iot-license-plate-recognition:jetson-lpr \
   bash
-
-  python3 csi.py
-  python3 rtsp.py
-  python3 rtsp.py RTSP_URL="rtsp://192.168.50.2:8554/mac"
+  RTSP_URL="rtsp://192.168.50.2:8554/mac" python3 rtsp.py 
   CSI_FPS=30 CSI_W=1280 CSI_H=720 SKIP=1 python3 csi.py
 ```
 
