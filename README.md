@@ -90,6 +90,14 @@ RTSP_URL="rtsp://192.168.50.2:8554/mac" python3 rtsp.py
 RTSP_URL="rtsp://192.168.50.2:8554/mac" RTSP_CODEC=h264 RTSP_LATENCY=200 SHOW=1 python3 rtsp.py
 
 
+
+
+IMG_SIZE=416 SKIP=1 CSI_MODE=3 CSI_FPS=30  python3 csi.py
+
+
+
+
+
 docker run --rm -it \
   --runtime nvidia \
   --network host \
@@ -155,3 +163,8 @@ python export.py --weights ../model/LP_ocr_nano_62.pt --img 640 --batch 1 --incl
 
 
 ```
+
+Check OpenCV DNN có dùng CUDA không
+
+python3 -c "import cv2; print('CUDA devices:', getattr(cv2.cuda,'getCudaEnabledDeviceCount',lambda:0)())"
+python3 -c "import cv2; print(cv2.getBuildInformation())" | grep -i -E "cuda|cudnn|opencv dnn"
