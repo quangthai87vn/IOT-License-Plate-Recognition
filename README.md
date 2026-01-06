@@ -87,6 +87,7 @@ xhost +local:docker
 python3 rtsp.py RTSP_URL="rtsp://192.168.50.2:8554/mac"
 
 RTSP_URL="rtsp://192.168.50.2:8554/mac" python3 rtsp.py
+RTSP_URL="rtsp://192.168.50.2:8554/mac" RTSP_CODEC=h264 RTSP_LATENCY=200 SHOW=1 python3 rtsp.py
 
 
 docker run --rm -it \
