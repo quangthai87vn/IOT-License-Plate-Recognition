@@ -1,44 +1,63 @@
 # webcam_onnx.py
-import os
+import os,sys
 import time
 import cv2
 import numpy as np
 
-# ====== CONFIG ======
-ONNX_PATH = os.environ.get("LPR_ONNX", "model/LP_detector_nano_61.onnx")
-IMG_SIZE  = int(os.environ.get("IMG_SIZE", "640"))
-CONF_THRES = float(os.environ.get("CONF", "0.25"))
-IOU_THRES  = float(os.environ.get("IOU", "0.45"))
-SHOW = os.environ.get("SHOW", "1") == "1"   # SHOW=0 nếu SSH/headless
 
-# CSI gstreamer pipeline (IMX219)
+# --- CONFIG (điều khiển bằng biến môi trường cho tiện) ---
+SRC = os.getenv("SRC", "csi")          # "csi" hoặc "rtsp"
+RTSP_URL = os.getenv("RTSP_URL", "")   # dùng khi SRC=rtsp
+
+CAM_W = int(os.getenv("CAM_W", "1280"))
+CAM_H = int(os.getenv("CAM_H", "720"))
+CAM_FPS = int(os.getenv("CAM_FPS", "30"))      # ép 30 cho mượt
+SENSOR_MODE = int(os.getenv("SENSOR_MODE", "3"))  # IMX219: mode 3 thường 30fps ổn
+FLIP = int(os.getenv("FLIP", "0"))
+
+# SHOW chỉ bật khi có DISPLAY (tránh lỗi khi SSH/headless)
+SHOW = (os.getenv("SHOW", "1") == "1") and bool(os.environ.get("DISPLAY", ""))
+
 def gstreamer_pipeline(
     sensor_id=0,
-    capture_width=1280, capture_height=720,
-    display_width=1280, display_height=720,
-    framerate=30, flip_method=0
+    sensor_mode=3,
+    capture_width=1280,
+    capture_height=720,
+    display_width=1280,
+    display_height=720,
+    framerate=30,
+    flip_method=0,
 ):
     return (
-        f"nvarguscamerasrc sensor-id={sensor_id} ! "
-        f"video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, "
-       # f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
-         f"format=(string)NV12, framerate=(fraction)30/1 ! "
-        f"nvvidconv flip-method={flip_method} ! "
-        f"video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! "
-        f"videoconvert ! video/x-raw, format=(string)BGR ! appsink drop=1"
+        "nvarguscamerasrc sensor-id=%d sensor-mode=%d ! "
+        "video/x-raw(memory:NVMM), width=(int)%d, height=(int)%d, framerate=(fraction)%d/1 ! "
+        "nvvidconv flip-method=%d ! "
+        "video/x-raw, width=(int)%d, height=(int)%d, format=(string)BGRx ! "
+        "videoconvert ! video/x-raw, format=(string)BGR ! "
+        "appsink drop=1 max-buffers=1 sync=false"
+        % (
+            sensor_id,
+            sensor_mode,
+            capture_width,
+            capture_height,
+            framerate,
+            flip_method,
+            display_width,
+            display_height,
+        )
     )
 
-'''
-pipeline = (
-"nvarguscamerasrc ! "
-"video/x-raw(memory:NVMM), width=1280, height=720, framerate=30/1 ! "
-"nvvidconv flip-method=0 ! "
-"video/x-raw, format=BGRx ! videoconvert ! "
-"video/x-raw, format=BGR ! "
-"appsink max-buffers=1 drop=1 sync=false"
-)
+def rtsp_pipeline(url, latency=0):
+    # ưu tiên H264; nếu camera bạn H265 thì đổi rtph264depay -> rtph265depay và h264parse -> h265parse
+    return (
+        f"rtspsrc location={url} latency={latency} drop-on-latency=true ! "
+        "rtph264depay ! h264parse ! nvv4l2decoder ! "
+        "nvvidconv ! video/x-raw, format=BGRx ! "
+        "videoconvert ! video/x-raw, format=BGR ! "
+        "appsink drop=1 max-buffers=1 sync=false"
+    )
 
-'''
+
 
 def letterbox(im, new_shape=640, color=(114,114,114)):
     shape = im.shape[:2]  # h,w
@@ -140,7 +159,26 @@ def main():
 
     model = YOLOv5ONNX(ONNX_PATH)
 
-    cap = cv2.VideoCapture(gstreamer_pipeline(), cv2.CAP_GSTREAMER)
+    if SRC == "rtsp":
+        if not RTSP_URL:
+            raise SystemExit("Thiếu RTSP_URL. Ví dụ: SRC=rtsp RTSP_URL='rtsp://...' python3 webcam_onnx.py")
+        pipeline = rtsp_pipeline(RTSP_URL, latency=0)
+    else:
+        pipeline = gstreamer_pipeline(
+            sensor_id=0,
+            sensor_mode=SENSOR_MODE,
+            capture_width=CAM_W,
+            capture_height=CAM_H,
+            display_width=CAM_W,
+            display_height=CAM_H,
+            framerate=CAM_FPS,
+            flip_method=FLIP,
+        )
+
+    cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+
+
+
     if not cap.isOpened():
         raise RuntimeError("Không mở được CSI camera (check /tmp/argus_socket mount + privileged)")
 
