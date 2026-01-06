@@ -175,16 +175,32 @@ python3 -c "import cv2; print(cv2.getBuildInformation())" | grep -i -E "cuda|cud
 
 
 
-  /usr/src/tensorrt/bin/trtexec \
+/usr/src/tensorrt/bin/trtexec \
   --onnx=./model/LP_detector_nano_61.onnx \
   --saveEngine=./model/LP_detector_nano_61_fp16.engine \
   --fp16 \
   --workspace=1024 \
   --timingCacheFile=./model/trt_cache.bin
 
-  /usr/src/tensorrt/bin/trtexec \
+
+# Build TensorRT engine cho OCR ONNX
+```bash
+sudo nvpmodel -m 0
+sudo jetson_clocks
+
+/usr/src/tensorrt/bin/trtexec \
   --onnx=./model/LP_ocr_nano_62.onnx \
   --saveEngine=./model/LP_ocr_nano_62_fp16.engine \
   --fp16 \
   --workspace=1024 \
-  --timingCacheFile=./model/trt_cache.bin
+  --timingCacheFile=./model/trt_ocr_cache.bin
+```
+# Build luôn engine cho Detector ONNX
+```
+  /usr/src/tensorrt/bin/trtexec \
+  --onnx=./model/LP_detector_nano_61.onnx \
+  --saveEngine=./model/LP_detector_nano_61_fp16.engine \
+  --fp16 \
+  --workspace=1024 \
+  --timingCacheFile=./model/trt_det_cache.bin
+```
