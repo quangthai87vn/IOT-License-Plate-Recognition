@@ -21,11 +21,24 @@ def gstreamer_pipeline(
     return (
         f"nvarguscamerasrc sensor-id={sensor_id} ! "
         f"video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, "
-        f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
+       # f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
+         f"format=(string)NV12, framerate=(fraction)30/1 ! "
         f"nvvidconv flip-method={flip_method} ! "
         f"video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! "
         f"videoconvert ! video/x-raw, format=(string)BGR ! appsink drop=1"
     )
+
+'''
+pipeline = (
+"nvarguscamerasrc ! "
+"video/x-raw(memory:NVMM), width=1280, height=720, framerate=30/1 ! "
+"nvvidconv flip-method=0 ! "
+"video/x-raw, format=BGRx ! videoconvert ! "
+"video/x-raw, format=BGR ! "
+"appsink max-buffers=1 drop=1 sync=false"
+)
+
+'''
 
 def letterbox(im, new_shape=640, color=(114,114,114)):
     shape = im.shape[:2]  # h,w
