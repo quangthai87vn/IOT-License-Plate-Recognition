@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
-import subprocess
-import sys
+# -*- coding: utf-8 -*-
 
-def main():
-    # pass-through args to webcam_onnx.py
-    cmd = ["python3", "webcam_onnx.py", "--source", "csi"]
-    cmd += sys.argv[1:]
-    raise SystemExit(subprocess.call(cmd))
+from webcam_onnx import main
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main(["--source", "csi", "--cam", "0", "--show", "1"]))

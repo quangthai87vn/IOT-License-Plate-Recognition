@@ -1,664 +1,578 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+ALPR on Jetson (CSI / RTSP / webcam) using TensorRT engines.
 
-import os
-import re
-import time
+Expected files (default):
+  model/LP_detector_nano_61_fp16.engine
+  model/LP_ocr_nano_62_fp16.engine
+
+If your engines have different names, pass --det_engine / --ocr_engine.
+
+Run:
+  python3 csi.py
+  python3 rtsp.py "rtsp://user:pass@ip:554/stream"
+  python3 webcam_onnx.py --source webcam --cam 0 --show 1
+"""
+
 import argparse
+import os
+import time
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 
 import cv2
 import numpy as np
 
-# TensorRT (optional but recommended)
-TRT_OK = True
-try:
-    import tensorrt as trt
-    import pycuda.driver as cuda
-except Exception:
-    TRT_OK = False
+import tensorrt as trt
+import pycuda.driver as cuda
+import pycuda.autoinit  # noqa: F401
 
 
-# -----------------------------
+# =========================
 # Utils
-# -----------------------------
-def now_ms() -> float:
-    return time.time() * 1000.0
+# =========================
 
+CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
-def clamp(v, lo, hi):
-    return max(lo, min(hi, v))
+def _softmax(x: np.ndarray, axis: int = -1) -> np.ndarray:
+    x = x - np.max(x, axis=axis, keepdims=True)
+    e = np.exp(x)
+    return e / (np.sum(e, axis=axis, keepdims=True) + 1e-9)
 
-
-def safe_imshow(win, img, show: int):
-    if show:
-        cv2.imshow(win, img)
-        cv2.waitKey(1)
-
+def make_trt_logger(severity=trt.Logger.WARNING):
+    try:
+        return trt.Logger(severity)
+    except TypeError:
+        try:
+            return trt.Logger(min_severity=severity)
+        except TypeError:
+            return trt.Logger()
 
 def letterbox(im: np.ndarray, new_shape=(640, 640), color=(114, 114, 114)):
-    """Resize with unchanged aspect ratio using padding (YOLO-style)."""
-    h, w = im.shape[:2]
-    new_w, new_h = new_shape[0], new_shape[1]
+    """Resize with padding (YOLO style). Returns: img, ratio, (dw, dh)."""
+    shape = im.shape[:2]  # h,w
+    if isinstance(new_shape, int):
+        new_shape = (new_shape, new_shape)
 
-    r = min(new_w / w, new_h / h)
-    nw, nh = int(round(w * r)), int(round(h * r))
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    new_unpad = (int(round(shape[1] * r)), int(round(shape[0] * r)))  # w,h
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]
+    dw /= 2
+    dh /= 2
 
-    im_resized = cv2.resize(im, (nw, nh), interpolation=cv2.INTER_LINEAR)
+    if shape[::-1] != new_unpad:
+        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
 
-    pad_w = new_w - nw
-    pad_h = new_h - nh
-    left = pad_w // 2
-    right = pad_w - left
-    top = pad_h // 2
-    bottom = pad_h - top
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
+    return im, r, (left, top)
 
-    im_padded = cv2.copyMakeBorder(im_resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)
-    return im_padded, r, (left, top)
+def scale_coords(boxes_xyxy: np.ndarray, ratio: float, pad: Tuple[int, int], orig_shape: Tuple[int, int]):
+    """Map boxes from letterboxed image back to original image."""
+    if boxes_xyxy.size == 0:
+        return boxes_xyxy
+    left, top = pad
+    boxes = boxes_xyxy.copy()
+    boxes[:, [0, 2]] -= left
+    boxes[:, [1, 3]] -= top
+    boxes[:, :4] /= ratio
+    h, w = orig_shape
+    boxes[:, 0] = np.clip(boxes[:, 0], 0, w - 1)
+    boxes[:, 2] = np.clip(boxes[:, 2], 0, w - 1)
+    boxes[:, 1] = np.clip(boxes[:, 1], 0, h - 1)
+    boxes[:, 3] = np.clip(boxes[:, 3], 0, h - 1)
+    return boxes
 
-
-def nms_boxes(boxes_xyxy: np.ndarray, scores: np.ndarray, iou_thres: float) -> List[int]:
-    """NMS using OpenCV."""
-    if len(boxes_xyxy) == 0:
+def nms_xyxy(boxes: np.ndarray, scores: np.ndarray, iou_thres: float) -> List[int]:
+    """NMS using OpenCV (expects xywh), so convert."""
+    if len(boxes) == 0:
         return []
-    b = boxes_xyxy.astype(np.float32)
-    x1, y1, x2, y2 = b[:, 0], b[:, 1], b[:, 2], b[:, 3]
-    w = (x2 - x1).clip(min=0)
-    h = (y2 - y1).clip(min=0)
-    rects = np.stack([x1, y1, w, h], axis=1).tolist()
-    idxs = cv2.dnn.NMSBoxes(rects, scores.tolist(), score_threshold=0.0, nms_threshold=float(iou_thres))
+    xywh = boxes.copy()
+    xywh[:, 2] = boxes[:, 2] - boxes[:, 0]
+    xywh[:, 3] = boxes[:, 3] - boxes[:, 1]
+    idxs = cv2.dnn.NMSBoxes(
+        bboxes=xywh.tolist(),
+        scores=scores.tolist(),
+        score_threshold=0.0,
+        nms_threshold=float(iou_thres),
+    )
     if len(idxs) == 0:
         return []
-    return [int(i) for i in idxs.flatten()]
+    return [int(i) for i in np.array(idxs).reshape(-1)]
 
 
-# -----------------------------
-# TensorRT Inference Wrapper
-# -----------------------------
-@dataclass
-class TrtBinding:
-    name: str
-    dtype: np.dtype
-    shape: Tuple[int, ...]
-    is_input: bool
-    host_mem: np.ndarray
-    device_mem: int  # cuda device pointer
+# =========================
+# TensorRT runner
+# =========================
 
-
-class TrtRunner:
-    """
-    Simple TensorRT runner for single input engine.
-    - Creates its own CUDA context (stable on Jetson)
-    - Supports fixed-shape engines and explicit-batch.
-    """
-    def __init__(self, engine_path: str, logger_severity: int = 2):
-        if not TRT_OK:
-            raise RuntimeError("TensorRT/pycuda not available in this environment.")
-
+class TRTModule:
+    def __init__(self, engine_path: str, logger_severity=trt.Logger.WARNING):
         if not os.path.exists(engine_path):
-            raise FileNotFoundError(f"Engine not found: {engine_path}")
+            raise FileNotFoundError(engine_path)
 
         self.engine_path = engine_path
-        self.logger = trt.Logger(logger_severity)  # WARNING=2
+        self.logger = make_trt_logger(logger_severity)
+        with open(engine_path, "rb") as f:
+            engine_bytes = f.read()
+
         self.runtime = trt.Runtime(self.logger)
-
-        self.ctx = None
-        self.stream = None
-        self.engine = None
-        self.context = None
-        self.bindings: List[TrtBinding] = []
-        self.binding_addrs: List[int] = []
-
-    def __enter__(self):
-        cuda.init()
-        dev = cuda.Device(0)
-        self.ctx = dev.make_context()  # IMPORTANT: stable context per process
-        self.stream = cuda.Stream()
-
-        with open(self.engine_path, "rb") as f:
-            engine_data = f.read()
-        self.engine = self.runtime.deserialize_cuda_engine(engine_data)
+        self.engine = self.runtime.deserialize_cuda_engine(engine_bytes)
         if self.engine is None:
-            raise RuntimeError(f"Failed to deserialize engine: {self.engine_path}")
+            raise RuntimeError(f"Failed to deserialize engine: {engine_path}")
 
         self.context = self.engine.create_execution_context()
         if self.context is None:
-            raise RuntimeError("Failed to create TRT execution context.")
+            raise RuntimeError("Failed to create execution context")
 
-        # If engine has dynamic shapes, we will set shape when calling infer().
-        # For allocation now, we allocate based on current binding shapes (may include -1).
-        self._allocate_buffers_initial()
-        return self
+        self.stream = cuda.Stream()
+        self.bindings = [None] * self.engine.num_bindings
 
-    def __exit__(self, exc_type, exc, tb):
-        try:
-            if self.stream is not None:
-                self.stream.synchronize()
-        except Exception:
-            pass
+        self.host_inputs: Dict[int, np.ndarray] = {}
+        self.device_inputs: Dict[int, int] = {}
+        self.host_outputs: Dict[int, np.ndarray] = {}
+        self.device_outputs: Dict[int, int] = {}
 
-        try:
-            for b in self.bindings:
-                try:
-                    cuda.mem_free(b.device_mem)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        self.input_binding_idxs = [i for i in range(self.engine.num_bindings) if self.engine.binding_is_input(i)]
+        self.output_binding_idxs = [i for i in range(self.engine.num_bindings) if not self.engine.binding_is_input(i)]
 
-        try:
-            if self.ctx is not None:
-                self.ctx.pop()
-                self.ctx.detach()
-        except Exception:
-            pass
+    def get_input_shape(self, binding_idx: int = 0) -> Tuple[int, ...]:
+        idx = self.input_binding_idxs[binding_idx]
+        return tuple(int(x) for x in self.engine.get_binding_shape(idx))
 
-    def _np_dtype(self, trt_dtype):
-        if trt_dtype == trt.DataType.FLOAT:
-            return np.float32
-        if trt_dtype == trt.DataType.HALF:
-            return np.float16
-        if trt_dtype == trt.DataType.INT8:
-            return np.int8
-        if trt_dtype == trt.DataType.INT32:
-            return np.int32
-        raise ValueError(f"Unsupported TRT dtype: {trt_dtype}")
+    def _allocate(self, binding_idx: int, shape: Tuple[int, ...], dtype: np.dtype):
+        size = int(np.prod(shape))
+        host = cuda.pagelocked_empty(size, dtype)
+        device = cuda.mem_alloc(host.nbytes)
+        self.bindings[binding_idx] = int(device)
+        return host, device
 
-    def _allocate_buffers_initial(self):
-        self.bindings = []
-        self.binding_addrs = [0] * self.engine.num_bindings
+    def _ensure_binding(self, binding_idx: int, shape: Tuple[int, ...], dtype: np.dtype, is_input: bool):
+        if is_input:
+            if binding_idx not in self.host_inputs or self.host_inputs[binding_idx].size != int(np.prod(shape)):
+                host, dev = self._allocate(binding_idx, shape, dtype)
+                self.host_inputs[binding_idx] = host
+                self.device_inputs[binding_idx] = dev
+        else:
+            if binding_idx not in self.host_outputs or self.host_outputs[binding_idx].size != int(np.prod(shape)):
+                host, dev = self._allocate(binding_idx, shape, dtype)
+                self.host_outputs[binding_idx] = host
+                self.device_outputs[binding_idx] = dev
 
-        for i in range(self.engine.num_bindings):
-            name = self.engine.get_binding_name(i)
-            is_input = self.engine.binding_is_input(i)
-            dtype = self._np_dtype(self.engine.get_binding_dtype(i))
+    def infer(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+        for bidx in self.input_binding_idxs:
+            name = self.engine.get_binding_name(bidx)
+            if name not in inputs:
+                raise KeyError(f"Missing input '{name}' for engine {self.engine_path}")
+            arr = inputs[name]
+            if not arr.flags["C_CONTIGUOUS"]:
+                arr = np.ascontiguousarray(arr)
 
-            shape = tuple(self.engine.get_binding_shape(i))
-            # If dynamic (-1), allocate a tiny placeholder; real allocation happens in infer()
-            if any(s < 0 for s in shape):
-                shape = (1,)
+            dtype = trt.nptype(self.engine.get_binding_dtype(bidx))
+            shape = tuple(int(x) for x in arr.shape)
 
-            size = int(np.prod(shape))
-            host_mem = cuda.pagelocked_empty(size, dtype)
-            device_mem = cuda.mem_alloc(host_mem.nbytes)
+            if -1 in self.engine.get_binding_shape(bidx):
+                self.context.set_binding_shape(bidx, shape)
 
-            self.bindings.append(
-                TrtBinding(
-                    name=name, dtype=dtype, shape=shape, is_input=is_input,
-                    host_mem=host_mem, device_mem=int(device_mem)
-                )
-            )
-            self.binding_addrs[i] = int(device_mem)
+            final_shape = tuple(int(x) for x in self.context.get_binding_shape(bidx))
+            self._ensure_binding(bidx, final_shape, np.dtype(dtype), is_input=True)
 
-    def _realloc_for_shapes(self, input_index: int, input_shape: Tuple[int, ...]):
-        """
-        Re-allocate buffers when engine uses dynamic shapes or when we want to force input shape.
-        """
-        # Set input binding shape
-        self.context.set_binding_shape(input_index, input_shape)
+            np.copyto(self.host_inputs[bidx], arr.ravel().astype(dtype, copy=False))
+            cuda.memcpy_htod_async(self.device_inputs[bidx], self.host_inputs[bidx], self.stream)
 
-        # Realloc all buffers based on runtime shapes
-        for i, b in enumerate(self.bindings):
-            real_shape = tuple(self.context.get_binding_shape(i))
-            if any(s < 0 for s in real_shape):
-                raise RuntimeError(f"Binding still dynamic after set_binding_shape: {b.name} shape={real_shape}")
-            real_size = int(np.prod(real_shape))
+        for bidx in self.output_binding_idxs:
+            dtype = trt.nptype(self.engine.get_binding_dtype(bidx))
+            shape = tuple(int(x) for x in self.context.get_binding_shape(bidx))
+            self._ensure_binding(bidx, shape, np.dtype(dtype), is_input=False)
 
-            # If size differs -> realloc
-            if real_size != b.host_mem.size:
-                # free old
-                try:
-                    cuda.mem_free(b.device_mem)
-                except Exception:
-                    pass
-
-                host_mem = cuda.pagelocked_empty(real_size, b.dtype)
-                device_mem = cuda.mem_alloc(host_mem.nbytes)
-
-                self.bindings[i] = TrtBinding(
-                    name=b.name, dtype=b.dtype, shape=real_shape, is_input=b.is_input,
-                    host_mem=host_mem, device_mem=int(device_mem)
-                )
-                self.binding_addrs[i] = int(device_mem)
-            else:
-                # update shape
-                self.bindings[i].shape = real_shape
-
-    def infer(self, inp: np.ndarray) -> List[np.ndarray]:
-        """
-        inp: contiguous numpy array matching input binding dtype/shape
-        returns list of outputs as numpy arrays
-        """
-        # Find input binding index
-        input_indices = [i for i in range(self.engine.num_bindings) if self.engine.binding_is_input(i)]
-        if len(input_indices) != 1:
-            raise RuntimeError("This runner supports engines with exactly 1 input.")
-        in_idx = input_indices[0]
-
-        # Ensure correct shape
-        inp = np.ascontiguousarray(inp)
-        target_shape = tuple(inp.shape)
-
-        # Dynamic or mismatched -> set and realloc
-        engine_in_shape = tuple(self.engine.get_binding_shape(in_idx))
-        if any(s < 0 for s in engine_in_shape) or tuple(self.context.get_binding_shape(in_idx)) != target_shape:
-            self._realloc_for_shapes(in_idx, target_shape)
-
-        # Copy input host
-        b_in = self.bindings[in_idx]
-        if inp.dtype != b_in.dtype:
-            inp = inp.astype(b_in.dtype)
-
-        np.copyto(b_in.host_mem.reshape(-1), inp.reshape(-1))
-        cuda.memcpy_htod_async(b_in.device_mem, b_in.host_mem, self.stream)
-
-        # Execute
-        ok = self.context.execute_async_v2(bindings=self.binding_addrs, stream_handle=int(self.stream.handle))
+        ok = self.context.execute_async_v2(self.bindings, self.stream.handle)
         if not ok:
-            raise RuntimeError("TensorRT execute_async_v2 failed.")
+            raise RuntimeError("TensorRT execution failed")
 
-        # Copy outputs back
-        outputs: List[np.ndarray] = []
-        for i, b in enumerate(self.bindings):
-            if b.is_input:
-                continue
-            cuda.memcpy_dtoh_async(b.host_mem, b.device_mem, self.stream)
+        for bidx in self.output_binding_idxs:
+            cuda.memcpy_dtoh_async(self.host_outputs[bidx], self.device_outputs[bidx], self.stream)
+
         self.stream.synchronize()
 
-        for i, b in enumerate(self.bindings):
-            if b.is_input:
-                continue
-            out = np.array(b.host_mem, copy=True).reshape(b.shape)
-            outputs.append(out)
+        out_arrays: Dict[str, np.ndarray] = {}
+        for bidx in self.output_binding_idxs:
+            name = self.engine.get_binding_name(bidx)
+            shape = tuple(int(x) for x in self.context.get_binding_shape(bidx))
+            dtype = trt.nptype(self.engine.get_binding_dtype(bidx))
+            out = np.array(self.host_outputs[bidx], copy=True).astype(dtype, copy=False).reshape(shape)
+            out_arrays[name] = out
 
-        return outputs
-
-
-# -----------------------------
-# OCR decoding (CTC)
-# -----------------------------
-def default_charset():
-    """
-    Charset for VN plates (common set).
-    If your repo uses a different mapping, chỉnh ở đây 1 phát là xong.
-    """
-    chars = list("0123456789")
-    chars += list("ABCDEFGHKLMNPRSTUVXYZ")  # bỏ mấy chữ dễ nhầm
-    chars += list("-.")
-    return chars
+        return out_arrays
 
 
-def ctc_greedy_decode(logits: np.ndarray, charset: List[str], blank: int = 0) -> str:
-    """
-    logits: (1, T, C) or (T, C) or (1, C, T) depending model.
-    We'll auto-fix to (T, C).
-    """
-    arr = logits
-    arr = np.array(arr)
+# =========================
+# Detector
+# =========================
 
-    # Squeeze batch
-    if arr.ndim == 3 and arr.shape[0] == 1:
-        arr = arr[0]
+@dataclass
+class Detection:
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    score: float
+    cls: int
 
-    # If shape looks like (C, T) -> transpose
-    if arr.ndim == 2:
-        # Heuristic: if first dim is classes and second is timesteps
-        # classes usually ~ (len(charset)+1) ~ 40-60
-        if arr.shape[0] <= 80 and arr.shape[1] > arr.shape[0]:
-            # could be (C,T) -> make (T,C)
-            if arr.shape[0] == (len(charset) + 1):
-                arr = arr.T
-        # else keep (T,C)
-    elif arr.ndim == 3:
-        # e.g. (C, H, W) not expected
-        arr = arr.reshape(arr.shape[0], -1).T
-    else:
-        arr = arr.reshape(-1, arr.shape[-1])
+class PlateDetector:
+    def __init__(self, engine_path: str, conf: float = 0.35, iou: float = 0.45, img_size: int = 640):
+        self.trt = TRTModule(engine_path, logger_severity=trt.Logger.WARNING)
+        self.conf = float(conf)
+        self.iou = float(iou)
+        self.img_size = int(img_size)
+        self.inp_name = self.trt.engine.get_binding_name(self.trt.input_binding_idxs[0])
 
-    # Greedy
-    pred = np.argmax(arr, axis=1).tolist()
+    def _decode_outputs(self, out: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if out.ndim == 3 and out.shape[0] == 1:
+            out = out[0]
 
-    # CTC collapse repeats + remove blank
-    res = []
-    prev = None
-    for p in pred:
-        if p == prev:
-            continue
-        prev = p
-        if p == blank:
-            continue
-        # map: (blank=0) => charset index (p-1)
-        ci = p - 1
-        if 0 <= ci < len(charset):
-            res.append(charset[ci])
+        # already NMSed: (N,6)
+        if out.ndim == 2 and out.shape[1] >= 6 and out.shape[1] <= 8:
+            boxes = out[:, 0:4].astype(np.float32)
+            scores = out[:, 4].astype(np.float32)
+            classes = out[:, 5].astype(np.int32)
+            keep = scores >= self.conf
+            return boxes[keep], scores[keep], classes[keep]
 
-    return "".join(res)
+        # YOLO raw: (N, 5+nc)
+        if out.ndim == 2 and out.shape[1] > 8:
+            boxes_cxcywh = out[:, 0:4].astype(np.float32)
+            obj = out[:, 4].astype(np.float32)
+            cls_probs = out[:, 5:].astype(np.float32)
+            cls_ids = np.argmax(cls_probs, axis=1)
+            cls_conf = cls_probs[np.arange(cls_probs.shape[0]), cls_ids]
+            scores = obj * cls_conf
 
-
-def format_vn_plate(raw: str) -> str:
-    """
-    Make it look like repo: "63-B9 951.64"
-    Input raw maybe: "63B995164"
-    """
-    s = raw.upper()
-    s = re.sub(r"[^0-9A-Z]", "", s)
-
-    if len(s) < 6:
-        return raw.strip()
-
-    # province
-    p = s[:2]
-    rest = s[2:]
-
-    # series: often starts with a letter; sometimes 1 letter + 1 digit (e.g. B9)
-    series = ""
-    number = ""
-
-    if len(rest) >= 2 and rest[0].isalpha():
-        series = rest[:2]
-        number = rest[2:]
-    else:
-        series = rest[:1]
-        number = rest[1:]
-
-    # format number with dot if length matches
-    if len(number) == 5:
-        number = f"{number[:3]}.{number[3:]}"
-    elif len(number) == 4:
-        number = f"{number[:2]}.{number[2:]}"
-
-    out = f"{p}-{series} {number}".strip()
-    return out
-
-
-# -----------------------------
-# Postprocess detector output (robust)
-# -----------------------------
-def parse_detector_output(out: np.ndarray, conf_thres: float) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Returns:
-      boxes_xyxy (N,4) in input-image pixel coords
-      scores (N,)
-    Supports common layouts:
-      - (1, N, 6): [x1,y1,x2,y2,conf,cls]
-      - (N, 6)
-      - (1, N, 85) style: [cx,cy,w,h,obj,cls...]
-      - (N, 85)
-    """
-    x = np.array(out)
-    x = np.squeeze(x)
-
-    if x.ndim == 1:
-        x = x.reshape(1, -1)
-
-    # If (N,6) -> assume xyxy
-    if x.ndim == 2 and x.shape[1] == 6:
-        boxes = x[:, 0:4].astype(np.float32)
-        scores = x[:, 4].astype(np.float32)
-        keep = scores >= conf_thres
-        return boxes[keep], scores[keep]
-
-    # If YOLO raw (N, >=6)
-    if x.ndim == 2 and x.shape[1] >= 6:
-        # If has many classes -> assume [cx,cy,w,h,obj,classes...]
-        if x.shape[1] > 10:
-            obj = x[:, 4].astype(np.float32)
-            cls_probs = x[:, 5:].astype(np.float32)
-            cls = np.max(cls_probs, axis=1)
-            scores = obj * cls
-            keep = scores >= conf_thres
-
-            y = x[keep]
+            keep = scores >= self.conf
+            boxes_cxcywh = boxes_cxcywh[keep]
             scores = scores[keep]
-            if len(y) == 0:
-                return np.zeros((0, 4), np.float32), np.zeros((0,), np.float32)
+            cls_ids = cls_ids[keep]
 
-            cxcywh = y[:, 0:4].astype(np.float32)
-            cx, cy, w, h = cxcywh[:, 0], cxcywh[:, 1], cxcywh[:, 2], cxcywh[:, 3]
-            boxes = np.stack([cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2], axis=1)
-            return boxes, scores.astype(np.float32)
+            boxes = np.zeros_like(boxes_cxcywh, dtype=np.float32)
+            boxes[:, 0] = boxes_cxcywh[:, 0] - boxes_cxcywh[:, 2] / 2
+            boxes[:, 1] = boxes_cxcywh[:, 1] - boxes_cxcywh[:, 3] / 2
+            boxes[:, 2] = boxes_cxcywh[:, 0] + boxes_cxcywh[:, 2] / 2
+            boxes[:, 3] = boxes_cxcywh[:, 1] + boxes_cxcywh[:, 3] / 2
+            return boxes, scores, cls_ids
 
-        # else unknown, try treat as xyxy + score
-        boxes = x[:, 0:4].astype(np.float32)
-        scores = x[:, 4].astype(np.float32)
-        keep = scores >= conf_thres
-        return boxes[keep], scores[keep]
+        raise RuntimeError(f"Unknown detector output shape: {out.shape}")
 
-    # If (something, something, 6/85)
-    if x.ndim == 3:
-        x = x.reshape(-1, x.shape[-1])
-        return parse_detector_output(x, conf_thres)
+    def detect(self, frame_bgr: np.ndarray) -> List[Detection]:
+        im0 = frame_bgr
+        h0, w0 = im0.shape[:2]
+        img, r, pad = letterbox(im0, new_shape=(self.img_size, self.img_size))
+        img = img[:, :, ::-1]  # BGR->RGB
+        img = img.astype(np.float32) / 255.0
+        img = np.transpose(img, (2, 0, 1))[None, ...]  # NCHW
 
-    return np.zeros((0, 4), np.float32), np.zeros((0,), np.float32)
+        outs = self.trt.infer({self.inp_name: img})
+        out = max(outs.values(), key=lambda a: a.size)
 
+        boxes, scores, classes = self._decode_outputs(out)
 
-def undo_letterbox(boxes_xyxy: np.ndarray, ratio: float, pad: Tuple[int, int], orig_w: int, orig_h: int):
-    """Map boxes from letterboxed image to original image coordinates."""
-    if len(boxes_xyxy) == 0:
-        return boxes_xyxy
+        if out.ndim == 2 and out.shape[1] > 8:
+            keep = nms_xyxy(boxes, scores, self.iou)
+            boxes, scores, classes = boxes[keep], scores[keep], classes[keep]
 
-    left, top = pad
-    b = boxes_xyxy.copy().astype(np.float32)
-    b[:, [0, 2]] -= left
-    b[:, [1, 3]] -= top
-    b /= ratio
+        boxes = scale_coords(boxes, r, pad, (h0, w0))
 
-    b[:, 0] = np.clip(b[:, 0], 0, orig_w - 1)
-    b[:, 2] = np.clip(b[:, 2], 0, orig_w - 1)
-    b[:, 1] = np.clip(b[:, 1], 0, orig_h - 1)
-    b[:, 3] = np.clip(b[:, 3], 0, orig_h - 1)
-    return b
+        dets: List[Detection] = []
+        for (x1, y1, x2, y2), sc, cl in zip(boxes, scores, classes):
+            dets.append(Detection(float(x1), float(y1), float(x2), float(y2), float(sc), int(cl)))
+        return dets
 
 
-# -----------------------------
+# =========================
+# OCR
+# =========================
+
+def ctc_decode_best(logits: np.ndarray) -> Tuple[str, float]:
+    if logits.ndim != 2:
+        raise ValueError(f"logits must be 2D (T,C), got {logits.shape}")
+
+    probs = logits
+    if not np.allclose(np.sum(probs, axis=1), 1.0, atol=1e-2):
+        probs = _softmax(probs, axis=1)
+
+    pred = np.argmax(probs, axis=1).astype(np.int32)
+    pred_prob = np.max(probs, axis=1).astype(np.float32)
+    C = probs.shape[1]
+
+    def decode_with(blank_id: int, offset: int) -> Tuple[str, float]:
+        out = []
+        prev = -999
+        confs = []
+        for i, p in zip(pred, pred_prob):
+            if i == prev:
+                continue
+            prev = i
+            if i == blank_id:
+                continue
+            j = int(i) - offset
+            if 0 <= j < len(CHARS):
+                out.append(CHARS[j])
+                confs.append(float(p))
+        text = "".join(out)
+        conf = float(np.mean(confs)) if confs else 0.0
+        return text, conf
+
+    candidates = [
+        decode_with(blank_id=0, offset=1),
+        decode_with(blank_id=C - 1, offset=0),
+        decode_with(blank_id=0, offset=0),
+    ]
+
+    def score(t_conf):
+        t, c = t_conf
+        L = len(t)
+        len_bonus = 0
+        if 6 <= L <= 10:
+            len_bonus = 2
+        elif 4 <= L <= 12:
+            len_bonus = 1
+        if L > 14:
+            len_bonus -= 3
+        return (len_bonus, c)
+
+    return max(candidates, key=score)
+
+def format_vn_plate(top: str, bottom: Optional[str] = None) -> str:
+    def fmt_top(s: str) -> str:
+        s = "".join([ch for ch in s if ch.isalnum()])
+        if len(s) == 4:
+            return s[:2] + "-" + s[2:]
+        if len(s) == 5:
+            return s[:3] + "-" + s[3:]
+        return s
+
+    def fmt_bottom(s: str) -> str:
+        s = "".join([ch for ch in s if ch.isalnum()])
+        if len(s) == 5:
+            return s[:3] + "." + s[3:]
+        if len(s) == 4:
+            return s[:2] + "." + s[2:]
+        return s
+
+    top_f = fmt_top(top)
+    if bottom is None or bottom == "":
+        return top_f
+    bot_f = fmt_bottom(bottom)
+    return f"{top_f} {bot_f}"
+
+class PlateOCR:
+    def __init__(self, engine_path: str):
+        self.trt = TRTModule(engine_path, logger_severity=trt.Logger.WARNING)
+        self.inp_name = self.trt.engine.get_binding_name(self.trt.input_binding_idxs[0])
+
+        ishape = self.trt.engine.get_binding_shape(self.trt.input_binding_idxs[0])
+        if -1 in ishape:
+            self.c, self.h, self.w = 3, 40, 160
+        else:
+            _, c, h, w = [int(x) for x in ishape]
+            self.c, self.h, self.w = c, h, w
+
+    def _prep(self, plate_bgr: np.ndarray) -> np.ndarray:
+        img = plate_bgr
+        if self.c == 1:
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            img = cv2.resize(img, (self.w, self.h), interpolation=cv2.INTER_LINEAR)
+            img = img.astype(np.float32) / 255.0
+            img = img[None, None, :, :]
+        else:
+            img = cv2.resize(img, (self.w, self.h), interpolation=cv2.INTER_LINEAR)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img = img.astype(np.float32) / 255.0
+            img = np.transpose(img, (2, 0, 1))[None, ...]
+        return img
+
+    def _extract_logits(self, outs: Dict[str, np.ndarray]) -> np.ndarray:
+        out = max(outs.values(), key=lambda a: a.size)
+        arr = out
+        if arr.ndim == 3 and arr.shape[0] == 1:
+            arr = arr[0]
+        if arr.ndim == 2:
+            if arr.shape[0] <= 128 and arr.shape[1] > arr.shape[0]:
+                return arr.T
+            return arr
+        if arr.ndim == 1:
+            raise RuntimeError(f"OCR output is 1D: {out.shape}")
+        arr = np.reshape(arr, (-1, arr.shape[-1]))
+        return arr
+
+    def recognize(self, plate_bgr: np.ndarray) -> Tuple[str, float]:
+        h, w = plate_bgr.shape[:2]
+        two_line = (h / (w + 1e-6)) > 0.55
+
+        if two_line:
+            top = plate_bgr[: h // 2, :]
+            bottom = plate_bgr[h // 2 :, :]
+            t_text, t_conf = self._recognize_one(top)
+            b_text, b_conf = self._recognize_one(bottom)
+            text = format_vn_plate(t_text, b_text)
+            conf = (t_conf + b_conf) / 2.0
+            return text, conf
+
+        text, conf = self._recognize_one(plate_bgr)
+        raw = "".join([ch for ch in text if ch.isalnum()])
+        if len(raw) >= 7:
+            top = raw[:4]
+            bottom = raw[4:]
+            return format_vn_plate(top, bottom), conf
+        return text, conf
+
+    def _recognize_one(self, img_bgr: np.ndarray) -> Tuple[str, float]:
+        inp = self._prep(img_bgr)
+        outs = self.trt.infer({self.inp_name: inp})
+        logits = self._extract_logits(outs)
+        text, conf = ctc_decode_best(logits)
+        return text, conf
+
+
+# =========================
 # Video sources
-# -----------------------------
-def gst_csi_pipeline(sensor_id=0, capture_w=1280, capture_h=720, framerate=30, flip=0):
+# =========================
+
+def gst_csi(sensor_id=0, width=1640, height=1232, fps=30, flip=0, out_w=1280, out_h=720):
     return (
         f"nvarguscamerasrc sensor-id={sensor_id} ! "
-        f"video/x-raw(memory:NVMM), width=(int){capture_w}, height=(int){capture_h}, "
-        f"format=(string)NV12, framerate=(fraction){framerate}/1 ! "
+        f"video/x-raw(memory:NVMM), width={width}, height={height}, framerate={fps}/1 ! "
         f"nvvidconv flip-method={flip} ! "
-        f"video/x-raw, width=(int){capture_w}, height=(int){capture_h}, format=(string)BGRx ! "
-        f"videoconvert ! video/x-raw, format=(string)BGR ! appsink drop=1 sync=false"
+        f"video/x-raw, width={out_w}, height={out_h}, format=BGRx ! "
+        f"videoconvert ! video/x-raw, format=BGR ! appsink drop=1"
     )
 
-
-def gst_rtsp_pipeline(url: str, latency=200):
+def gst_rtsp(url: str, latency: int = 200):
     return (
         f"rtspsrc location={url} latency={latency} ! "
         f"rtph264depay ! h264parse ! nvv4l2decoder ! "
-        f"nvvidconv ! video/x-raw,format=BGRx ! videoconvert ! "
-        f"video/x-raw,format=BGR ! appsink drop=1 sync=false"
+        f"nvvidconv ! video/x-raw, format=BGRx ! "
+        f"videoconvert ! video/x-raw, format=BGR ! appsink drop=1"
     )
 
-
-# -----------------------------
-# Main loop
-# -----------------------------
-def run(args):
-    det_engine = args.det_engine
-    ocr_engine = args.ocr_engine
-
-    if not os.path.exists(det_engine):
-        raise FileNotFoundError(f"Missing det_engine: {det_engine}")
-    if not os.path.exists(ocr_engine):
-        raise FileNotFoundError(f"Missing ocr_engine: {ocr_engine}")
-
-    # Open source
+def open_capture(args) -> cv2.VideoCapture:
     if args.source == "csi":
-        cap = cv2.VideoCapture(gst_csi_pipeline(args.sensor_id, args.csi_w, args.csi_h, args.csi_fps, args.flip), cv2.CAP_GSTREAMER)
-    elif args.source == "rtsp":
-        if not args.rtsp:
-            raise ValueError("RTSP source selected but --rtsp is empty.")
-        cap = cv2.VideoCapture(gst_rtsp_pipeline(args.rtsp, args.rtsp_latency), cv2.CAP_GSTREAMER)
-    else:
-        cap = cv2.VideoCapture(args.cam)
+        return cv2.VideoCapture(
+            gst_csi(sensor_id=args.cam, fps=args.csi_fps, out_w=args.csi_w, out_h=args.csi_h),
+            cv2.CAP_GSTREAMER,
+        )
+    if args.source == "rtsp":
+        cap = cv2.VideoCapture(args.rtsp)
+        if cap.isOpened():
+            return cap
+        return cv2.VideoCapture(gst_rtsp(args.rtsp, latency=args.rtsp_latency), cv2.CAP_GSTREAMER)
+    return cv2.VideoCapture(int(args.cam))
 
+
+# =========================
+# Main
+# =========================
+
+def run(args) -> int:
+    detector = PlateDetector(args.det_engine, conf=args.conf, iou=args.nms, img_size=args.det_size)
+    ocr = PlateOCR(args.ocr_engine)
+
+    cap = open_capture(args)
     if not cap.isOpened():
-        raise RuntimeError("Cannot open video source. (Check docker args + /tmp/argus_socket for CSI + network for RTSP)")
+        raise RuntimeError("Không mở được camera/luồng video. Kiểm tra --source, --cam, --rtsp và GStreamer trong Docker.")
 
-    charset = default_charset()
+    win = "ALPR"
+    if args.show:
+        cv2.namedWindow(win, cv2.WINDOW_NORMAL)
 
-    # TRT runners
-    with TrtRunner(det_engine) as det_trt, TrtRunner(ocr_engine) as ocr_trt:
-        last_t = time.time()
-        fps = 0.0
-        frame_id = 0
+    fps = 0.0
 
+    try:
         while True:
             ok, frame = cap.read()
             if not ok or frame is None:
-                # RTSP sometimes returns None briefly
                 time.sleep(0.02)
                 continue
 
-            frame_id += 1
-            H, W = frame.shape[:2]
+            t0 = time.time()
+            dets = detector.detect(frame)
 
-            # FPS
-            t = time.time()
-            dt = t - last_t
-            last_t = t
-            if dt > 0:
-                fps = 0.9 * fps + 0.1 * (1.0 / dt)
+            plates = 0
+            for d in dets:
+                x1, y1, x2, y2 = map(int, [d.x1, d.y1, d.x2, d.y2])
+                pad = int(0.06 * max(x2 - x1, y2 - y1))
+                x1p = max(0, x1 - pad); y1p = max(0, y1 - pad)
+                x2p = min(frame.shape[1]-1, x2 + pad); y2p = min(frame.shape[0]-1, y2 + pad)
+                crop = frame[y1p:y2p, x1p:x2p]
+                if crop.size == 0:
+                    continue
 
-            # Detector preprocess
-            inp_det, ratio, pad = letterbox(frame, (args.det_size, args.det_size))
-            rgb = cv2.cvtColor(inp_det, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            chw = np.transpose(rgb, (2, 0, 1))[None, ...]  # (1,3,H,W)
-
-            # TRT infer detector
-            det_outs = det_trt.infer(chw)
-            det_out = det_outs[0]
-
-            boxes_inp, scores = parse_detector_output(det_out, args.conf)
-            if len(boxes_inp) > 0:
-                # If normalized coords, scale to det_size
-                m = float(np.max(boxes_inp))
-                if m <= 2.0:  # heuristic normalized
-                    boxes_inp[:, [0, 2]] *= args.det_size
-                    boxes_inp[:, [1, 3]] *= args.det_size
-
-            # Undo letterbox to original frame
-            boxes = undo_letterbox(boxes_inp, ratio, pad, W, H)
-
-            # NMS
-            keep = nms_boxes(boxes, scores, args.nms)
-            boxes = boxes[keep] if len(keep) else np.zeros((0, 4), np.float32)
-            scores_kept = scores[keep] if len(keep) else np.zeros((0,), np.float32)
-
-            plates_text = []
-
-            # OCR only every N frames if set
-            do_ocr = (args.ocr_every <= 1) or (frame_id % args.ocr_every == 0)
-
-            for i in range(len(boxes)):
-                x1, y1, x2, y2 = boxes[i].astype(int)
-                x1 = clamp(x1, 0, W - 1)
-                y1 = clamp(y1, 0, H - 1)
-                x2 = clamp(x2, 0, W - 1)
-                y2 = clamp(y2, 0, H - 1)
+                text, conf = ocr.recognize(crop)
 
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                label = f"{text} ({conf:.2f})"
+                cv2.putText(frame, label, (x1, max(0, y1 - 8)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA)
+                plates += 1
 
-                if not do_ocr:
-                    continue
+            dt = time.time() - t0
+            fps = 0.9 * fps + 0.1 * (1.0 / max(dt, 1e-6))
+            cv2.putText(frame, f"FPS {fps:.1f} plates={plates}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
 
-                roi = frame[y1:y2, x1:x2]
-                if roi.size == 0:
-                    continue
+            if args.show:
+                cv2.imshow(win, frame)
+                key = cv2.waitKey(1) & 0xFF
+                if key in (27, ord('q')):
+                    break
 
-                # OCR preprocess
-                roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
-                roi_resized = cv2.resize(roi_rgb, (args.ocr_w, args.ocr_h), interpolation=cv2.INTER_LINEAR)
-                o = roi_resized.astype(np.float32) / 255.0
-                o = np.transpose(o, (2, 0, 1))[None, ...]  # (1,3,H,W)
+    finally:
+        try:
+            cap.release()
+        except Exception:
+            pass
+        if args.show:
+            try:
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
 
-                # TRT infer OCR
-                ocr_outs = ocr_trt.infer(o)
-                logits = ocr_outs[0]
-
-                raw = ctc_greedy_decode(logits, charset, blank=0)
-                plate = format_vn_plate(raw)
-
-                plates_text.append(plate)
-
-                # draw text above box (repo style)
-                cv2.putText(
-                    frame,
-                    plate,
-                    (x1, max(0, y1 - 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.9,
-                    (0, 0, 255),
-                    2,
-                    cv2.LINE_AA
-                )
-
-            # HUD
-            cv2.putText(frame, f"FPS {fps:.1f} plates={len(boxes)}", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-
-            safe_imshow("ALPR", frame, args.show)
-
-            # Exit key
-            if args.show and (cv2.waitKey(1) & 0xFF) == ord('q'):
-                break
-
-    cap.release()
-    if args.show:
-        cv2.destroyAllWindows()
+    return 0
 
 
-def build_argparser():
-    p = argparse.ArgumentParser("ALPR TensorRT (CSI/RTSP/Webcam)")
+def build_argparser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser()
+    p.add_argument("--source", choices=["csi", "rtsp", "webcam"], default="csi")
+    p.add_argument("--cam", default=0, help="CSI sensor-id hoặc webcam index")
+    p.add_argument("--rtsp", default="", help="RTSP URL nếu --source rtsp")
+    p.add_argument("--rtsp_latency", type=int, default=200)
 
-    p.add_argument("--source", choices=["csi", "rtsp", "webcam"], default="csi",
-                   help="Video source type")
-    p.add_argument("--show", type=int, default=1, help="1 to show window, 0 headless")
-
-    # CSI
-    p.add_argument("--sensor_id", type=int, default=0)
     p.add_argument("--csi_w", type=int, default=1280)
     p.add_argument("--csi_h", type=int, default=720)
     p.add_argument("--csi_fps", type=int, default=30)
-    p.add_argument("--flip", type=int, default=0)
 
-    # RTSP
-    p.add_argument("--rtsp", type=str, default="")
-    p.add_argument("--rtsp_latency", type=int, default=200)
-
-    # Webcam
-    p.add_argument("--cam", type=int, default=0)
-
-    # Models
-    p.add_argument("--det_engine", type=str, default="./model/LP_detector_nano_61_fp16.engine")
-    p.add_argument("--ocr_engine", type=str, default="./model/LP_ocr_nano_62_fp16.engine")
-
-    # Params
+    p.add_argument("--det_engine", default="model/LP_detector_nano_61_fp16.engine")
+    p.add_argument("--ocr_engine", default="model/LP_ocr_nano_62_fp16.engine")
     p.add_argument("--det_size", type=int, default=640)
-    p.add_argument("--ocr_w", type=int, default=160)
-    p.add_argument("--ocr_h", type=int, default=40)
-    p.add_argument("--conf", type=float, default=0.45)
-    p.add_argument("--nms", type=float, default=0.35)
-    p.add_argument("--ocr_every", type=int, default=1, help="OCR every N frames (>=1)")
 
+    p.add_argument("--conf", type=float, default=0.35)
+    p.add_argument("--nms", type=float, default=0.45)
+
+    p.add_argument("--show", type=int, default=1)
     return p
 
 
-def main():
-    args = build_argparser().parse_args()
+def main(argv: Optional[List[str]] = None) -> int:
+    args = build_argparser().parse_args(argv)
+    try:
+        args.cam = int(args.cam)
+    except Exception:
+        pass
 
-    if not TRT_OK:
-        raise RuntimeError(
-            "Thiếu TensorRT/pycuda trong container. "
-            "Bạn đang chạy Jetson thì thường có sẵn. Nếu không có, image/Dockerfile đang sai base."
-        )
+    if args.source == "rtsp" and not args.rtsp:
+        raise SystemExit("Bạn chọn --source rtsp thì phải truyền --rtsp <URL>")
 
-    run(args)
+    return run(args)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

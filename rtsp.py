@@ -1,22 +1,12 @@
 #!/usr/bin/env python3
-import subprocess
+# -*- coding: utf-8 -*-
+
 import sys
-
-def main():
-    # Usage:
-    #   python3 rtsp.py rtsp://ip:8554/xxx
-    # or:
-    #   python3 rtsp.py --rtsp rtsp://ip:8554/xxx
-    args = sys.argv[1:]
-    cmd = ["python3", "webcam_onnx.py", "--source", "rtsp"]
-
-    if len(args) >= 1 and not args[0].startswith("-"):
-        # positional RTSP
-        cmd += ["--rtsp", args[0]] + args[1:]
-    else:
-        cmd += args
-
-    raise SystemExit(subprocess.call(cmd))
+from webcam_onnx import main
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) < 2:
+        print("Thiếu RTSP URL. Ví dụ: python3 rtsp.py \"rtsp://192.168.1.10:554/stream\"")
+        sys.exit(2)
+    url = sys.argv[1]
+    raise SystemExit(main(["--source", "rtsp", "--rtsp", url, "--show", "1"]))
