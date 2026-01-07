@@ -132,7 +132,6 @@ rsync -av --delete \
   mtl@192.168.50.1:~/IOT/IOT-License-Plate-Recognition/
 
 
-
 # Vào bên trong Docker
 docker exec -it <CONTAINER_NAME_OR_ID> bash
 
