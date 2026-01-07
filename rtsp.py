@@ -1,27 +1,14 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import os
 import sys
+import runpy
 
-def main():
-    # usage:
-    #   python3 rtsp.py "rtsp://user:pass@ip:554/..." 
-    # or set env RTSP_URL
-    rtsp_url = ""
-    if len(sys.argv) >= 2 and sys.argv[1].startswith("rtsp"):
-        rtsp_url = sys.argv[1]
-        rest = sys.argv[2:]
-    else:
-        rtsp_url = os.getenv("RTSP_URL", "")
-        rest = sys.argv[1:]
+# RTSP wrapper
+os.environ["ALPR_SOURCE"] = "rtsp"
 
-    if not rtsp_url:
-        raise RuntimeError('Thiếu RTSP URL. Dùng: python3 rtsp.py "rtsp://..." hoặc set env RTSP_URL')
+if len(sys.argv) < 2:
+    print("Usage: python3 rtsp.py <rtsp_url>")
+    sys.exit(1)
 
-    os.environ["SRC"] = "rtsp"
-    os.environ["RTSP_URL"] = rtsp_url
-    os.execvp("python3", ["python3", "webcam_onnx.py"] + rest)
-
-if __name__ == "__main__":
-    main()
+os.environ["RTSP_URL"] = sys.argv[1]
+runpy.run_path("webcam_onnx.py", run_name="__main__")
