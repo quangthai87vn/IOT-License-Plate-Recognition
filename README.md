@@ -130,32 +130,25 @@ rsync -av --delete \
   mtl@192.168.50.1:~/IOT/IOT-License-Plate-Recognition/
 # Vào bên trong Docker
 docker exec -it <CONTAINER_NAME_OR_ID> bash
-# Export về ONNX
-python export.py --weights ../model/LP_detector_nano_61.pt --img 640 --batch 1 --include onnx --opset 12 
-python export.py --weights ../model/LP_ocr_nano_62.pt --img 640 --batch 1 --include onnx --opset 12 
+# Export về ONNX trên Jetson nano
+python3 yolov5/export.py --weights model/LP_detector_nano_61.pt --include onnx --img 640 --opset 12 --simplify
+python3 yolov5/export.py --weights model/LP_ocr_nano_62.pt --include onnx --img 640 --opset 12 --simplify
 ```
-# Build TensorRT engine cho OCR ONNX
+# Build TensorRT engine OCR DETECTOR ONNX
 ```bash
 sudo nvpmodel -m 0
 sudo jetson_clocks
-
 /usr/src/tensorrt/bin/trtexec \
-  --onnx=./model/LP_ocr_nano_62.onnx \
-  --saveEngine=./model/LP_ocr_nano_62_fp16.engine \
+  --onnx=model/LP_detector_nano_61.onnx \
+  --saveEngine=model/LP_detector_nano_61_fp16.engine \
   --fp16 \
-  --workspace=1024 \
-  --timingCacheFile=./model/trt_ocr_cache.bin
-```
-# Build luôn engine cho Detector ONNX
-```
-  /usr/src/tensorrt/bin/trtexec \
-  --onnx=./model/LP_detector_nano_61.onnx \
-  --saveEngine=./model/LP_detector_nano_61_fp16.engine \
+  --minShapes=images:1x3x640x640 --optShapes=images:1x3x640x640 --maxShapes=images:1x3x640x640
+/usr/src/tensorrt/bin/trtexec \
+  --onnx=model/LP_ocr_nano_62.onnx \
+  --saveEngine=model/LP_ocr_nano_62_fp16.engine \
   --fp16 \
-  --workspace=1024 \
-  --timingCacheFile=./model/trt_det_cache.bin
+  --minShapes=images:1x3x640x640 --optShapes=images:1x3x640x640 --maxShapes=images:1x3x640x640
 ```
-
 
 # (Docker + CSI/RTSP) — file .sh
 ```
