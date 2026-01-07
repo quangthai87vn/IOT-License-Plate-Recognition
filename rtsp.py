@@ -1,57 +1,48 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Shortcut chạy RTSP cho ALPR.
+"""rtsp.py - wrapper chạy RTSP cho nhanh.
 
-2 kiểu chạy:
-  python3 rtsp.py --rtsp "rtsp://192.168.50.2:8554/mac" --show 1
-hoặc:
+Usage:
   python3 rtsp.py "rtsp://192.168.50.2:8554/mac" --show 1
+  python3 rtsp.py "rtsp://..." --latency 200 --tcp 1 --show 1
 """
+
 import argparse
-import subprocess
+import os
 import sys
-from pathlib import Path
 
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument("rtsp_url", nargs="?", default="", help="RTSP url (positional)")
-    p.add_argument("--rtsp", type=str, default="", help="RTSP url (flag)")
-    p.add_argument("--latency", type=int, default=100)
-    p.add_argument("--udp", action="store_true")
-    p.add_argument("--out_w", type=int, default=1280)
-    p.add_argument("--out_h", type=int, default=720)
-    p.add_argument("--conf", type=float, default=0.35)
-    p.add_argument("--nms", type=float, default=0.45)
-    p.add_argument("--show", type=int, default=1)
-    return p.parse_args()
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument('rtsp', help='RTSP url, vd: rtsp://192.168.50.2:8554/mac')
+    ap.add_argument('--show', type=int, default=1)
+    ap.add_argument('--latency', type=int, default=200)
+    ap.add_argument('--tcp', type=int, default=1)
+    ap.add_argument('--rtsp_w', type=int, default=1280)
+    ap.add_argument('--rtsp_h', type=int, default=720)
 
+    # optional override engine paths
+    ap.add_argument('--det_engine', type=str, default="model/LP_detector_nano_61_fp16.engine")
+    ap.add_argument('--ocr_engine', type=str, default="model/LP_ocr_nano_62_fp16.engine")
 
-def main():
-    a = parse_args()
-    url = a.rtsp or a.rtsp_url
-    if not url:
-        print("ERROR: thiếu RTSP url. Ví dụ: python3 rtsp.py rtsp://IP:PORT/...", file=sys.stderr)
-        raise SystemExit(2)
+    args = ap.parse_args(argv)
 
-    script = Path(__file__).resolve().parent / "webcam_onnx.py"
-    cmd = [
-        sys.executable, str(script),
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import webcam_onnx
+
+    run_argv = [
         "--source", "rtsp",
-        "--rtsp", url,
-        "--rtsp_latency", str(a.latency),
-        "--out_w", str(a.out_w),
-        "--out_h", str(a.out_h),
-        "--conf", str(a.conf),
-        "--nms", str(a.nms),
-        "--show", str(a.show),
+        "--rtsp", args.rtsp,
+        "--rtsp_latency", str(args.latency),
+        "--rtsp_tcp", str(args.tcp),
+        "--rtsp_w", str(args.rtsp_w),
+        "--rtsp_h", str(args.rtsp_h),
+        "--show", str(args.show),
+        "--det_engine", args.det_engine,
+        "--ocr_engine", args.ocr_engine,
     ]
-    if a.udp:
-        cmd.append("--rtsp_udp")
-
-    raise SystemExit(subprocess.call(cmd))
+    return webcam_onnx.main(run_argv)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -107,17 +107,7 @@ docker run --rm -it \
   bash
 
 
-  RTSP_URL="rtsp://192.168.50.2:8554/mac" python3 rtsp.py 
-  python3 csi.py
-  python3 csi.py --show 1
-  python3 rtsp.py "rtsp://192.168.50.2:8554/mac" --show 1
-
-  python3 csi.py --show --det_every 2 --ocr_every 5
-  python3 rtsp.py rtsp://192.168.50.2:8554/mac --show
-
-  python3 csi.py --show 1
-  python3 webcam_onnx.py --source rtsp --rtsp "rtsp://192.168.50.2:8554/mac" --show 1
-  python3 rtsp.py "rtsp://192.168.50.2:8554/mac" --show 1
+python3 alpr_stream_pt.py --source rtsp --rtsp "rtsp://192.168.50.2:8554/mac" --show 1 --rtsp_latency 250 --out_w 1280 --out_h 720
 
 
 ```
@@ -138,12 +128,9 @@ rsync -av --delete \
   mtl@192.168.50.1:~/IOT/IOT-License-Plate-Recognition/
 # Vào bên trong Docker
 docker exec -it <CONTAINER_NAME_OR_ID> bash
-
 # Export về ONNX
 python export.py --weights ../model/LP_detector_nano_61.pt --img 640 --batch 1 --include onnx --opset 12 
 python export.py --weights ../model/LP_ocr_nano_62.pt --img 640 --batch 1 --include onnx --opset 12 
-
-
 ```
 # Build TensorRT engine cho OCR ONNX
 ```bash
