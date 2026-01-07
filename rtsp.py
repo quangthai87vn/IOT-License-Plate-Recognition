@@ -1,18 +1,28 @@
 #!/usr/bin/env python3
-import os
+# -*- coding: utf-8 -*-
+"""Shortcut runner for RTSP.
+
+Supports:
+  python3 rtsp.py --rtsp rtsp://ip:8554/stream --show
+  python3 rtsp.py rtsp://ip:8554/stream --show
+"""
+
 import sys
-import runpy
 
-# RTSP wrapper
-os.environ["ALPR_SOURCE"] = "rtsp"
 
-if len(sys.argv) < 2:
-    print("Usage: python3 rtsp.py <rtsp_url>")
-    sys.exit(1)
+def main():
+    from webcam_onnx import main as alpr_main
 
-os.environ["RTSP_URL"] = sys.argv[1]
+    args = sys.argv[1:]
 
-# IMPORTANT: do NOT pass argv to webcam_onnx.py
-sys.argv = ["webcam_onnx.py"]
+    # If user passed URL as positional, convert -> --rtsp URL
+    if args and (not args[0].startswith("-")):
+        args = ["--rtsp", args[0]] + args[1:]
 
-runpy.run_path("webcam_onnx.py", run_name="__main__")
+    argv = ["webcam_onnx.py", "--source", "rtsp"] + args
+    sys.argv = argv
+    alpr_main()
+
+
+if __name__ == "__main__":
+    main()
