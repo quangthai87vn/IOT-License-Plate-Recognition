@@ -108,6 +108,7 @@ docker run --rm -it \
 
 
 python3 alpr_stream_pt.py --source rtsp --rtsp "rtsp://192.168.50.2:8554/mac" --show 1 --rtsp_latency 250 --out_w 1280 --out_h 720
+python3 alpr_stream_pt.py --source csi --cam 0 --show 1 --csi_w 1640 --csi_h 1232 --csi_fps 30 --out_w 1280 --out_h 720 --flip 0
 
 
 ```
