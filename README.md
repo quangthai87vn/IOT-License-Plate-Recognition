@@ -112,6 +112,8 @@ docker run --rm -it \
   python3 csi.py --show 1
   python3 rtsp.py "rtsp://192.168.50.2:8554/mac" --show 1
 
+  python3 csi.py --show --det_every 2 --ocr_every 5
+  python3 rtsp.py rtsp://192.168.50.2:8554/mac --show
 
 
 ```
