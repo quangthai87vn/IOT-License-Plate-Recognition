@@ -106,8 +106,10 @@ docker run --rm -it \
   iot-license-plate-recognition:jetson-lpr \
   bash
 
-
-python3 rtsp.py "rtsp://192.168.50.2:8554/mac" --show 1 --rtsp_latency 350
+python3 alpr_trt.py --source rtsp --rtsp "rtsp://192.168.50.2:8554/mac" --show 1
+python3 alpr_trt.py --source rtsp --rtsp "rtsp://192.168.50.2:8554/mac" --rtsp_codec h265 --show 1
+python3 alpr_trt.py --source rtsp --rtsp "rtsp://192.168.50.2:8554/mac" --rtsp_latency 300 --rtsp_tcp 1 --show 1
+python3 alpr_trt.py --source csi --csi_w 1280 --csi_h 720 --csi_fps 30 --show 1
 
 
 ```
