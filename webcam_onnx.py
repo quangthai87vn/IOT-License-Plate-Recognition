@@ -1,633 +1,481 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-webcam_onnx.py
 
-ALPR realtime on Jetson (CSI / RTSP / USB webcam) using TensorRT engines.
-
-Fixes for your case:
-- Có CLI đúng: --source {csi,rtsp,webcam}
-- Fix TensorRT Logger (TRT8)
-- OCR không bị mismatch shape (auto đọc input shape từ engine)
-- OCR decode kiểu CTC (collapse repeat + remove blank) => không còn ra chuỗi rác 5555....
-- RTSP dùng GStreamer TCP + latency để tránh nhoè / decode error
-"""
-
-import argparse
 import os
-import re
-import sys
 import time
+import argparse
 from dataclasses import dataclass
+from typing import List, Tuple, Optional
 
 import cv2
 import numpy as np
 
-# TensorRT + PyCUDA (Jetson thường có sẵn trong image l4t)
 import tensorrt as trt
 import pycuda.driver as cuda
+import pycuda.autoinit  # tạo CUDA context 1 lần (quan trọng, đỡ "unspecified launch failure")
 
 
 # ----------------------------
-# Utils
+# Utils: labels + format VN
 # ----------------------------
-def load_charset(path: str):
-    if not path:
-        return None
-    with open(path, "r", encoding="utf-8") as f:
-        s = f.read().strip()
-    # cho phép file dạng "0123..." hoặc mỗi dòng 1 ký tự
-    if "\n" in s:
-        chars = [x.strip() for x in s.splitlines() if x.strip()]
-        return "".join(chars)
-    return s
+def try_load_labels(paths: List[str]) -> Optional[List[str]]:
+    for p in paths:
+        if p and os.path.isfile(p):
+            with open(p, "r", encoding="utf-8") as f:
+                lines = [x.strip() for x in f.read().splitlines() if x.strip()]
+            if lines:
+                return lines
+    return None
+
+
+def default_ocr_labels():
+    # fallback nếu không có file labels
+    # thường YOLO OCR dùng 0-9 + A-Z (bỏ I,O,Q,W) nhưng mỗi repo khác nhau.
+    # -> tốt nhất để file labels.txt trong model/
+    chars = list("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-.")
+    return chars
 
 
 def format_vn_plate(raw: str) -> str:
     """
-    Heuristic format biển VN:
-    - Ví dụ motor: 63B995164 -> 63-B9 951.64
-    - Ví dụ motor 4 số cuối: 54S70661 -> 54-S7 0661
-    - Nếu raw đã có '-' '.' thì giữ nguyên tương đối.
+    Heuristic format biển số VN phổ biến:
+      - Motor: 63B995164 -> 63-B9 951.64
+      - Car:   51F99999  -> 51F-999.99 (tuỳ series)
+    Nếu raw đã có '-' '.' ' ' thì giữ nguyên.
     """
-    if not raw:
-        return ""
-
-    s = raw.upper()
-    s = re.sub(r"[^0-9A-Z\-\.]", "", s)
-
-    # Nếu đã có dấu, trả về luôn nhưng gọn lại khoảng trắng
-    if "-" in s or "." in s:
-        s = re.sub(r"\s+", " ", s).strip()
+    s = raw.strip().upper()
+    if not s:
+        return s
+    # nếu đã có format
+    if any(ch in s for ch in ["-", ".", " "]):
         return s
 
-    # motor phổ biến: 2 số + (A-Z)(0-9) + 3 số + 2 số
-    m = re.match(r"^(\d{2})([A-Z]\d)(\d{3})(\d{2})$", s)
-    if m:
-        return f"{m.group(1)}-{m.group(2)} {m.group(3)}.{m.group(4)}"
+    # chỉ giữ A-Z0-9
+    s2 = "".join([c for c in s if c.isalnum()])
 
-    # motor: 2 số + (A-Z)(0-9) + 4 số
-    m = re.match(r"^(\d{2})([A-Z]\d)(\d{4})$", s)
-    if m:
-        return f"{m.group(1)}-{m.group(2)} {m.group(3)}"
-
-    # car dạng đơn giản: 2 số + (A-Z) + 5 số
-    m = re.match(r"^(\d{2})([A-Z])(\d{5})$", s)
-    if m:
-        return f"{m.group(1)}-{m.group(2)} {m.group(3)}"
-
+    # motor kiểu: 2 số + 2 ký tự + 5 số (vd 63B995164 hoặc 63B965814)
+    if len(s2) == 9 and s2[:2].isdigit() and s2[2:4].isalnum() and s2[4:].isdigit():
+        return f"{s2[:2]}-{s2[2:4]} {s2[4:7]}.{s2[7:]}"
+    # 8 ký tự: 2 số + 1 chữ + 5 số (vd 51F99999)
+    if len(s2) == 8 and s2[:2].isdigit() and s2[2].isalnum() and s2[3:].isdigit():
+        return f"{s2[:3]}-{s2[3:6]}.{s2[6:]}"
     return s
 
 
-def letterbox(img, new_shape=(640, 640), color=(114, 114, 114)):
-    """
-    YOLO-style letterbox. returns resized_img, scale, pad (dw, dh)
-    """
-    h, w = img.shape[:2]
-    new_w, new_h = new_shape
-
-    r = min(new_w / w, new_h / h)
-    nw, nh = int(round(w * r)), int(round(h * r))
-    img_resized = cv2.resize(img, (nw, nh), interpolation=cv2.INTER_LINEAR)
-
-    dw, dh = new_w - nw, new_h - nh
-    dw //= 2
-    dh //= 2
-
-    out = np.full((new_h, new_w, 3), color, dtype=np.uint8)
-    out[dh:dh + nh, dw:dw + nw] = img_resized
-    return out, r, (dw, dh)
+# ----------------------------
+# GStreamer pipelines
+# ----------------------------
+def gst_csi_pipeline(sensor_id=0, csi_w=1640, csi_h=1232, fps=30, flip=0, out_w=1280, out_h=720):
+    return (
+        f"nvarguscamerasrc sensor-id={sensor_id} ! "
+        f"video/x-raw(memory:NVMM), width={csi_w}, height={csi_h}, framerate={fps}/1 ! "
+        f"nvvidconv flip-method={flip} ! "
+        f"video/x-raw, width={out_w}, height={out_h}, format=BGRx ! "
+        f"videoconvert ! video/x-raw, format=BGR ! "
+        f"appsink drop=1 sync=false max-buffers=1"
+    )
 
 
-def nms_boxes(boxes_xyxy, scores, iou_thr=0.45):
-    """
-    OpenCV NMSBoxes expects xywh, so convert.
-    """
-    if len(boxes_xyxy) == 0:
-        return []
-
-    b = []
-    for (x1, y1, x2, y2) in boxes_xyxy:
-        b.append([float(x1), float(y1), float(x2 - x1), float(y2 - y1)])
-    idxs = cv2.dnn.NMSBoxes(b, scores, score_threshold=0.0, nms_threshold=iou_thr)
-    if idxs is None or len(idxs) == 0:
-        return []
-    return [int(i) for i in np.array(idxs).reshape(-1)]
+def gst_rtsp_pipeline(url, latency=250, tcp=True, out_w=1280, out_h=720):
+    proto = "tcp" if tcp else "udp"
+    # pipeline decode H264 bằng HW (nvv4l2decoder) để nhẹ
+    return (
+        f"rtspsrc location={url} latency={latency} protocols={proto} drop-on-latency=true ! "
+        f"rtph264depay ! h264parse ! nvv4l2decoder enable-max-performance=1 ! "
+        f"nvvidconv ! video/x-raw, width={out_w}, height={out_h}, format=BGRx ! "
+        f"videoconvert ! video/x-raw, format=BGR ! "
+        f"appsink drop=1 sync=false max-buffers=1"
+    )
 
 
 # ----------------------------
-# TensorRT Runner
+# TensorRT runner
 # ----------------------------
 @dataclass
-class Binding:
-    name: str
-    dtype: np.dtype
-    shape: tuple
-    is_input: bool
+class TrtIO:
     host: np.ndarray
-    device: int
+    device: cuda.DeviceAllocation
+    size: int
 
 
 class TrtRunner:
     """
-    Minimal TensorRT engine runner (supports static + dynamic input shapes)
+    Load TensorRT engine (.engine), infer 1 input -> 1 output (hoặc nhiều outputs).
+    Hỗ trợ dynamic shapes nhưng mặc định bạn đang build 640x640 cố định.
     """
-    def __init__(self, engine_path: str, logger_severity=trt.Logger.WARNING):
+    def __init__(self, engine_path: str, logger_severity: int = trt.Logger.WARNING):
         self.engine_path = engine_path
         self.logger = trt.Logger(logger_severity)
         self.runtime = trt.Runtime(self.logger)
 
-        if not os.path.exists(engine_path):
-            raise FileNotFoundError(f"Engine not found: {engine_path}")
+        if not os.path.isfile(engine_path):
+            raise FileNotFoundError(f"Không thấy engine: {engine_path}")
 
         with open(engine_path, "rb") as f:
-            engine_data = f.read()
-        self.engine = self.runtime.deserialize_cuda_engine(engine_data)
+            buf = f.read()
+        self.engine = self.runtime.deserialize_cuda_engine(buf)
         if self.engine is None:
-            raise RuntimeError("Failed to deserialize engine")
+            raise RuntimeError(f"Deserialize engine failed: {engine_path}")
 
         self.context = self.engine.create_execution_context()
         if self.context is None:
-            raise RuntimeError("Failed to create execution context")
+            raise RuntimeError("create_execution_context failed")
 
-        self.bindings = []
-        self.binding_addrs = [None] * self.engine.num_bindings
         self.stream = cuda.Stream()
 
-        # allocate with current (maybe -1) shapes later
-        self._allocated = False
-
-    def get_input_shape(self):
-        # assume 1 input
+        # bindings
+        self.bindings = [None] * self.engine.num_bindings
+        self.inputs_idx = []
+        self.outputs_idx = []
         for i in range(self.engine.num_bindings):
             if self.engine.binding_is_input(i):
-                shape = tuple(self.context.get_binding_shape(i))
-                return i, shape, self.engine.get_binding_name(i)
-        raise RuntimeError("No input binding")
+                self.inputs_idx.append(i)
+            else:
+                self.outputs_idx.append(i)
 
-    def _alloc_if_needed(self, input_shape=None):
-        """
-        Allocate buffers. If dynamic, set binding shape first.
-        """
-        if input_shape is not None:
-            # set input shape if dynamic
-            for i in range(self.engine.num_bindings):
-                if self.engine.binding_is_input(i):
-                    self.context.set_binding_shape(i, tuple(input_shape))
-
-        # now allocate based on context binding shapes
-        self.bindings = []
-        self.binding_addrs = [None] * self.engine.num_bindings
-
+        # allocate once with max shapes (ở đây assume fixed)
+        self.io = {}
         for i in range(self.engine.num_bindings):
-            name = self.engine.get_binding_name(i)
+            shape = self.context.get_binding_shape(i)
+            if -1 in shape:
+                # dynamic -> set default
+                # bạn đang dùng 1x3x640x640 nên set vậy luôn
+                if self.engine.binding_is_input(i):
+                    self.context.set_binding_shape(i, (1, 3, 640, 640))
+                    shape = self.context.get_binding_shape(i)
+
             dtype = trt.nptype(self.engine.get_binding_dtype(i))
-            shape = tuple(self.context.get_binding_shape(i))
-            is_input = self.engine.binding_is_input(i)
-
-            if any(s < 0 for s in shape):
-                raise RuntimeError(f"Unresolved dynamic shape for binding {name}: {shape}")
-
-            size = int(np.prod(shape))
-            host = cuda.pagelocked_empty(size, dtype=dtype)
+            vol = int(trt.volume(shape))
+            host = cuda.pagelocked_empty(vol, dtype)
             device = cuda.mem_alloc(host.nbytes)
+            self.bindings[i] = int(device)
+            self.io[i] = TrtIO(host=host, device=device, size=host.nbytes)
 
-            self.bindings.append(Binding(name=name, dtype=dtype, shape=shape, is_input=is_input,
-                                         host=host, device=int(device)))
-            self.binding_addrs[i] = int(device)
+    def infer(self, input_tensor: np.ndarray) -> List[np.ndarray]:
+        # assume 1 input
+        in_idx = self.inputs_idx[0]
 
-        self._allocated = True
-
-    def infer(self, inp: np.ndarray):
-        """
-        inp must be contiguous float32 and match input binding shape
-        returns list of outputs as numpy arrays with correct shapes
-        """
-        inp = np.ascontiguousarray(inp)
-
-        # allocate buffers based on inp shape
-        if (not self._allocated) or True:
-            self._alloc_if_needed(input_shape=inp.shape)
+        # set shape if needed
+        if -1 in tuple(self.context.get_binding_shape(in_idx)):
+            self.context.set_binding_shape(in_idx, input_tensor.shape)
 
         # copy input
-        # assume first input binding is index where is_input True
-        for b in self.bindings:
-            if b.is_input:
-                if int(np.prod(b.shape)) != inp.size:
-                    raise RuntimeError(f"Input size mismatch. engine expects {b.shape} ({int(np.prod(b.shape))}), got {inp.shape} ({inp.size})")
-                np.copyto(np.frombuffer(b.host, dtype=b.dtype, count=inp.size), inp.reshape(-1))
-                cuda.memcpy_htod_async(b.device, b.host, self.stream)
+        np.copyto(self.io[in_idx].host, input_tensor.ravel())
+        cuda.memcpy_htod_async(self.io[in_idx].device, self.io[in_idx].host, self.stream)
 
         # execute
-        ok = self.context.execute_async_v2(bindings=self.binding_addrs, stream_handle=int(self.stream.handle))
+        ok = self.context.execute_async_v2(bindings=self.bindings, stream_handle=self.stream.handle)
         if not ok:
-            raise RuntimeError("TensorRT execute failed")
+            raise RuntimeError("TensorRT execute_async_v2 failed")
 
-        # copy outputs back
+        # copy outputs
         outputs = []
-        for b in self.bindings:
-            if not b.is_input:
-                cuda.memcpy_dtoh_async(b.host, b.device, self.stream)
-
+        for out_idx in self.outputs_idx:
+            cuda.memcpy_dtoh_async(self.io[out_idx].host, self.io[out_idx].device, self.stream)
         self.stream.synchronize()
 
-        for b in self.bindings:
-            if not b.is_input:
-                out = np.array(b.host, copy=True).reshape(b.shape)
-                outputs.append(out)
-
+        for out_idx in self.outputs_idx:
+            shape = tuple(self.context.get_binding_shape(out_idx))
+            out = np.array(self.io[out_idx].host, copy=True).reshape(shape)
+            outputs.append(out)
         return outputs
 
 
 # ----------------------------
-# OCR Decoder (CTC greedy)
+# YOLO postprocess (ONNX/TRT output kiểu (1, N, 5+nc))
 # ----------------------------
-class CTCDecoder:
-    def __init__(self, charset: str, blank_index: int = 0):
-        self.charset = charset
-        self.blank = blank_index
-
-        # mapping index -> char:
-        # if blank=0, chars start at 1
-        self.idx2char = {}
-        start = 0
-        if self.blank == 0:
-            start = 1
-        for i, ch in enumerate(self.charset):
-            self.idx2char[start + i] = ch
-
-    def decode(self, logits: np.ndarray):
-        """
-        Supports logits shape:
-        - (1, T, C)
-        - (T, C)
-        - (1, C, T)
-        Returns (text, avg_conf)
-        """
-        x = logits
-        if x.ndim == 3 and x.shape[0] == 1:
-            x = x[0]
-
-        # if (C, T) -> transpose
-        if x.ndim == 2:
-            T, C = x.shape
-            if C < 10 and T > C:
-                # maybe (C, T)
-                x = x.transpose(1, 0)
-
-        if x.ndim != 2:
-            # fallback flatten
-            x = x.reshape(-1, x.shape[-1])
-
-        # softmax over classes
-        x = x.astype(np.float32)
-        x = x - np.max(x, axis=1, keepdims=True)
-        probs = np.exp(x)
-        probs = probs / (np.sum(probs, axis=1, keepdims=True) + 1e-9)
-
-        idx = np.argmax(probs, axis=1).tolist()
-        conf = np.max(probs, axis=1).tolist()
-
-        # CTC collapse repeats + remove blank
-        out = []
-        out_conf = []
-        prev = None
-        for i, p in zip(idx, conf):
-            if i == self.blank:
-                prev = i
-                continue
-            if prev == i:
-                continue
-            ch = self.idx2char.get(i, "")
-            if ch:
-                out.append(ch)
-                out_conf.append(p)
-            prev = i
-
-        if len(out) == 0:
-            return "", 0.0
-        return "".join(out), float(np.mean(out_conf))
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
 
 
-# ----------------------------
-# Video capture builders
-# ----------------------------
-def gst_csi(sensor_id=0, width=1280, height=720, fps=30, flip=0):
-    return (
-        f"nvarguscamerasrc sensor-id={sensor_id} ! "
-        f"video/x-raw(memory:NVMM), width={width}, height={height}, framerate={fps}/1 ! "
-        f"nvvidconv flip-method={flip} ! "
-        f"video/x-raw, format=BGRx ! videoconvert ! "
-        f"video/x-raw, format=BGR ! appsink drop=1 sync=false max-buffers=1"
-    )
+def yolo_nms(boxes, scores, iou_th=0.45):
+    idxs = scores.argsort()[::-1]
+    keep = []
+    while idxs.size > 0:
+        i = idxs[0]
+        keep.append(i)
+        if idxs.size == 1:
+            break
+        ious = iou(boxes[i], boxes[idxs[1:]])
+        idxs = idxs[1:][ious < iou_th]
+    return keep
 
 
-def gst_rtsp(url, width=1280, height=720, latency=200, tcp=True):
-    # TCP giảm packet loss => đỡ nhoè.
-    proto = "tcp" if tcp else "udp"
-    return (
-        f"rtspsrc location={url} latency={latency} protocols={proto} drop-on-latency=true ! "
-        f"rtph264depay ! h264parse ! nvv4l2decoder ! "
-        f"nvvidconv ! video/x-raw,format=BGRx,width={width},height={height} ! "
-        f"videoconvert ! video/x-raw,format=BGR ! appsink drop=1 sync=false max-buffers=1"
-    )
+def iou(box, boxes):
+    # box: (x1,y1,x2,y2), boxes: (M,4)
+    x1 = np.maximum(box[0], boxes[:, 0])
+    y1 = np.maximum(box[1], boxes[:, 1])
+    x2 = np.minimum(box[2], boxes[:, 2])
+    y2 = np.minimum(box[3], boxes[:, 3])
+    inter = np.maximum(0, x2 - x1) * np.maximum(0, y2 - y1)
+    area1 = (box[2] - box[0]) * (box[3] - box[1])
+    area2 = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    return inter / (area1 + area2 - inter + 1e-6)
 
 
-def open_capture(args):
-    if args.source == "csi":
-        cap = cv2.VideoCapture(
-            gst_csi(args.csi_id, args.csi_w, args.csi_h, args.csi_fps, args.flip),
-            cv2.CAP_GSTREAMER,
-        )
-        return cap
-
-    if args.source == "rtsp":
-        cap = cv2.VideoCapture(
-            gst_rtsp(args.rtsp, args.rtsp_w, args.rtsp_h, args.rtsp_latency, args.rtsp_tcp),
-            cv2.CAP_GSTREAMER,
-        )
-        return cap
-
-    # usb webcam
-    cap = cv2.VideoCapture(args.cam)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.webcam_w)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.webcam_h)
-    cap.set(cv2.CAP_PROP_FPS, args.webcam_fps)
-    return cap
-
-
-# ----------------------------
-# Detector postprocess (YOLO-ish)
-# ----------------------------
-def decode_detector_output(out: np.ndarray, conf_thr=0.4):
+def preprocess_bgr(frame: np.ndarray, input_size=640):
     """
-    Try to decode common YOLO export:
-    out shape can be:
-    - (1, N, 6) : [x, y, w, h, conf, cls] or [x1,y1,x2,y2,conf,cls]
-    - (N, 6)
-    - (1, N, 5+nc)
-    This function returns list of (xyxy, score, cls).
+    letterbox -> (1,3,640,640) float32, BGR->RGB, normalize 0..1
+    return: tensor, ratio, pad
     """
-    x = out
-    if x.ndim == 3 and x.shape[0] == 1:
-        x = x[0]
+    h, w = frame.shape[:2]
+    scale = min(input_size / w, input_size / h)
+    nw, nh = int(w * scale), int(h * scale)
+    resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_LINEAR)
 
-    if x.ndim != 2:
-        x = x.reshape(-1, x.shape[-1])
+    canvas = np.full((input_size, input_size, 3), 114, dtype=np.uint8)
+    pad_x = (input_size - nw) // 2
+    pad_y = (input_size - nh) // 2
+    canvas[pad_y:pad_y+nh, pad_x:pad_x+nw] = resized
 
-    if x.shape[1] < 6:
+    rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    chw = np.transpose(rgb, (2, 0, 1))
+    tensor = np.expand_dims(chw, axis=0).astype(np.float32)
+    return tensor, scale, pad_x, pad_y
+
+
+def postprocess_yolo(outputs: List[np.ndarray], conf_th=0.25, iou_th=0.45,
+                     scale=1.0, pad_x=0, pad_y=0, orig_w=1280, orig_h=720):
+    """
+    outputs[0] shape thường: (1, N, 5+nc)
+    return list detections: (x1,y1,x2,y2, conf, cls)
+    """
+    out = outputs[0]
+    if out.ndim == 3:
+        pred = out[0]
+    else:
+        pred = out.reshape(-1, out.shape[-1])
+
+    # pred: [cx,cy,w,h,obj, cls...]
+    obj = pred[:, 4]
+    cls_scores = pred[:, 5:]
+    cls_id = np.argmax(cls_scores, axis=1)
+    cls_conf = cls_scores[np.arange(cls_scores.shape[0]), cls_id]
+    conf = obj * cls_conf
+
+    mask = conf > conf_th
+    pred = pred[mask]
+    conf = conf[mask]
+    cls_id = cls_id[mask]
+
+    if pred.shape[0] == 0:
         return []
 
-    res = []
-    if x.shape[1] == 6:
-        for row in x:
-            a = row.astype(np.float32)
-            conf = float(a[4])
-            if conf < conf_thr:
-                continue
-            cls = int(a[5])
-            # guess format
-            x1, y1, x2, y2 = float(a[0]), float(a[1]), float(a[2]), float(a[3])
-            # if looks like xywh (w/h positive, x2 smaller)
-            if x2 <= x1 or y2 <= y1:
-                cx, cy, w, h = x1, y1, x2, y2
-                x1 = cx - w / 2.0
-                y1 = cy - h / 2.0
-                x2 = cx + w / 2.0
-                y2 = cy + h / 2.0
-            res.append(((x1, y1, x2, y2), conf, cls))
-        return res
+    cx, cy, bw, bh = pred[:, 0], pred[:, 1], pred[:, 2], pred[:, 3]
+    x1 = cx - bw / 2
+    y1 = cy - bh / 2
+    x2 = cx + bw / 2
+    y2 = cy + bh / 2
 
-    # 5+nc (YOLO classic)
-    # [cx,cy,w,h,obj, cls_probs...]
-    nc = x.shape[1] - 5
-    for row in x:
-        a = row.astype(np.float32)
-        obj = float(a[4])
-        if obj < conf_thr:
-            continue
-        cls_scores = a[5:]
-        cls = int(np.argmax(cls_scores))
-        conf = float(obj * cls_scores[cls])
-        if conf < conf_thr:
-            continue
-        cx, cy, w, h = float(a[0]), float(a[1]), float(a[2]), float(a[3])
-        x1 = cx - w / 2.0
-        y1 = cy - h / 2.0
-        x2 = cx + w / 2.0
-        y2 = cy + h / 2.0
-        res.append(((x1, y1, x2, y2), conf, cls))
-    return res
+    # undo letterbox
+    x1 = (x1 - pad_x) / scale
+    y1 = (y1 - pad_y) / scale
+    x2 = (x2 - pad_x) / scale
+    y2 = (y2 - pad_y) / scale
+
+    x1 = np.clip(x1, 0, orig_w - 1)
+    y1 = np.clip(y1, 0, orig_h - 1)
+    x2 = np.clip(x2, 0, orig_w - 1)
+    y2 = np.clip(y2, 0, orig_h - 1)
+
+    boxes = np.stack([x1, y1, x2, y2], axis=1).astype(np.float32)
+
+    keep = yolo_nms(boxes, conf.astype(np.float32), iou_th=iou_th)
+    dets = []
+    for i in keep:
+        dets.append((int(boxes[i, 0]), int(boxes[i, 1]), int(boxes[i, 2]), int(boxes[i, 3]),
+                     float(conf[i]), int(cls_id[i])))
+    return dets
+
+
+# ----------------------------
+# OCR decode: sort boxes -> string
+# ----------------------------
+def decode_plate_from_chars(dets_chars: List[Tuple[int,int,int,int,float,int]],
+                            labels: List[str],
+                            y_gap=18) -> str:
+    """
+    dets_chars: char boxes on crop
+    sort by line (y), then x
+    """
+    if not dets_chars:
+        return "unknown"
+
+    # group into lines by y-center
+    items = []
+    for (x1,y1,x2,y2,conf,cls) in dets_chars:
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        ch = labels[cls] if cls < len(labels) else "?"
+        items.append((cy, cx, ch, conf))
+
+    items.sort(key=lambda t: t[0])  # sort by y
+    lines = []
+    for it in items:
+        placed = False
+        for ln in lines:
+            if abs(ln["cy"] - it[0]) < y_gap:
+                ln["items"].append(it)
+                ln["cy"] = (ln["cy"] + it[0]) / 2
+                placed = True
+                break
+        if not placed:
+            lines.append({"cy": it[0], "items": [it]})
+
+    # sort each line by x
+    lines.sort(key=lambda ln: ln["cy"])
+    text_lines = []
+    for ln in lines[:2]:  # biển số thường 1-2 dòng
+        ln["items"].sort(key=lambda t: t[1])
+        text_lines.append("".join([t[2] for t in ln["items"]]))
+
+    raw = " ".join(text_lines).strip()
+    raw = raw.replace("..", ".").replace("--", "-")
+    return raw if raw else "unknown"
 
 
 # ----------------------------
 # Main
 # ----------------------------
-def build_argparser():
+def open_capture(args):
+    if args.source == "csi":
+        pipe = gst_csi_pipeline(
+            sensor_id=args.cam,
+            csi_w=args.csi_w, csi_h=args.csi_h, fps=args.csi_fps,
+            flip=args.flip, out_w=args.out_w, out_h=args.out_h
+        )
+        cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
+        return cap
+
+    if args.source == "rtsp":
+        pipe = gst_rtsp_pipeline(
+            args.rtsp, latency=args.rtsp_latency, tcp=not args.rtsp_udp,
+            out_w=args.out_w, out_h=args.out_h
+        )
+        cap = cv2.VideoCapture(pipe, cv2.CAP_GSTREAMER)
+        return cap
+
+    return cv2.VideoCapture(args.webcam)
+
+
+def main():
     ap = argparse.ArgumentParser()
 
-    ap.add_argument("--source", choices=["csi", "rtsp", "webcam"], default="webcam",
-                    help="input source")
-    ap.add_argument("--show", type=int, default=1, help="show window (1/0)")
-
-    # RTSP
-    ap.add_argument("--rtsp", type=str, default="", help="rtsp url")
-    ap.add_argument("--rtsp_w", type=int, default=1280)
-    ap.add_argument("--rtsp_h", type=int, default=720)
-    ap.add_argument("--rtsp_latency", type=int, default=200)
-    ap.add_argument("--rtsp_tcp", type=int, default=1, help="1=tcp, 0=udp")
+    ap.add_argument("--source", choices=["csi", "rtsp", "webcam"], default="csi")
+    ap.add_argument("--show", type=int, default=1)
 
     # CSI
-    ap.add_argument("--csi_id", type=int, default=0)
-    ap.add_argument("--csi_w", type=int, default=1280)
-    ap.add_argument("--csi_h", type=int, default=720)
+    ap.add_argument("--cam", type=int, default=0)
+    ap.add_argument("--csi_w", type=int, default=1640)
+    ap.add_argument("--csi_h", type=int, default=1232)
     ap.add_argument("--csi_fps", type=int, default=30)
     ap.add_argument("--flip", type=int, default=0)
+    ap.add_argument("--out_w", type=int, default=1280)
+    ap.add_argument("--out_h", type=int, default=720)
 
-    # Webcam
-    ap.add_argument("--cam", type=int, default=0)
-    ap.add_argument("--webcam_w", type=int, default=1280)
-    ap.add_argument("--webcam_h", type=int, default=720)
-    ap.add_argument("--webcam_fps", type=int, default=30)
+    # RTSP
+    ap.add_argument("--rtsp", type=str, default="")
+    ap.add_argument("--rtsp_latency", type=int, default=300)
+    ap.add_argument("--rtsp_udp", action="store_true")  # default TCP
 
-    # Models
+    # webcam
+    ap.add_argument("--webcam", type=int, default=0)
+
+    # TensorRT engines
     ap.add_argument("--det_engine", type=str, default="model/LP_detector_nano_61_fp16.engine")
     ap.add_argument("--ocr_engine", type=str, default="model/LP_ocr_nano_62_fp16.engine")
 
     # thresholds
-    ap.add_argument("--conf", type=float, default=0.35)
+    ap.add_argument("--det_conf", type=float, default=0.35)
+    ap.add_argument("--ocr_conf", type=float, default=0.35)
     ap.add_argument("--nms", type=float, default=0.45)
 
-    # OCR decode
-    ap.add_argument("--ocr_blank", type=int, default=0)
-    ap.add_argument("--ocr_charset", type=str, default="", help="optional charset file")
-    ap.add_argument("--ocr_min_conf", type=float, default=0.35)
+    # labels
+    ap.add_argument("--ocr_labels", type=str, default="")  # optional
 
-    return ap
+    args = ap.parse_args()
 
+    # labels
+    labels = try_load_labels([
+        args.ocr_labels,
+        "model/ocr_labels.txt",
+        "model/ocr.names",
+        "model/classes_ocr.txt",
+        "model/classes.txt",
+    ]) or default_ocr_labels()
 
-def main(argv=None):
-    cuda.init()
-    device = cuda.Device(0)
-    ctx = device.make_context()
+    print("[INFO] OCR labels =", len(labels))
+    print("[INFO] det_engine =", args.det_engine)
+    print("[INFO] ocr_engine =", args.ocr_engine)
 
-    try:
-        ap = build_argparser()
-        args = ap.parse_args(argv)
+    det_trt = TrtRunner(args.det_engine, logger_severity=trt.Logger.WARNING)
+    ocr_trt = TrtRunner(args.ocr_engine, logger_severity=trt.Logger.WARNING)
 
-        if args.source == "rtsp" and not args.rtsp:
-            print("Bạn chọn --source rtsp nhưng chưa truyền --rtsp URL")
-            return 2
+    cap = open_capture(args)
+    if not cap.isOpened():
+        raise SystemExit("[ERROR] Không mở được video source. Kiểm tra CSI/RTSP pipeline.")
 
-        # Charset default: digits + A-Z
-        charset = load_charset(args.ocr_charset)
-        if not charset:
-            charset = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    prev = time.time()
 
-        # Load engines
-        det = TrtRunner(args.det_engine, logger_severity=trt.Logger.WARNING)
-        ocr = TrtRunner(args.ocr_engine, logger_severity=trt.Logger.WARNING)
+    while True:
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            continue
 
-        # read model input shapes
-        det_in_idx, det_in_shape, _ = det.get_input_shape()
-        ocr_in_idx, ocr_in_shape, _ = ocr.get_input_shape()
+        H, W = frame.shape[:2]
 
-        # expect NCHW
-        det_h = int(det_in_shape[2]) if len(det_in_shape) == 4 else 640
-        det_w = int(det_in_shape[3]) if len(det_in_shape) == 4 else 640
+        # -------- DET plate --------
+        det_in, scale, pad_x, pad_y = preprocess_bgr(frame, input_size=640)
+        det_outs = det_trt.infer(det_in)
+        plates = postprocess_yolo(det_outs, conf_th=args.det_conf, iou_th=args.nms,
+                                 scale=scale, pad_x=pad_x, pad_y=pad_y, orig_w=W, orig_h=H)
 
-        # OCR shape may be dynamic; take abs if set
-        if len(ocr_in_shape) == 4 and all(s > 0 for s in ocr_in_shape):
-            ocr_h = int(ocr_in_shape[2])
-            ocr_w = int(ocr_in_shape[3])
-        else:
-            # fallback commonly used
-            ocr_h, ocr_w = 40, 160
+        plates_count = 0
 
-        decoder = CTCDecoder(charset=charset, blank_index=args.ocr_blank)
-
-        cap = open_capture(args)
-        if not cap.isOpened():
-            print("❌ Không mở được nguồn video. Check lại CSI/RTSP/USB, và docker run có --runtime nvidia + X11 chưa.")
-            return 1
-
-        win = "ALPR"
-        if args.show:
-            cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-
-        last = time.time()
-        fps = 0.0
-
-        while True:
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                # RTSP đôi khi rớt frame, chờ nhẹ
-                time.sleep(0.01)
+        for (x1,y1,x2,y2,conf,cls) in plates:
+            # crop
+            pad = 6
+            x1p = max(0, x1-pad); y1p = max(0, y1-pad)
+            x2p = min(W-1, x2+pad); y2p = min(H-1, y2+pad)
+            crop = frame[y1p:y2p, x1p:x2p]
+            if crop.size == 0:
                 continue
 
-            # FPS
-            now = time.time()
-            dt = now - last
-            if dt > 0:
-                fps = 0.9 * fps + 0.1 * (1.0 / dt)
-            last = now
+            # -------- OCR char detect on crop --------
+            ch_in, s2, px2, py2 = preprocess_bgr(crop, input_size=640)
+            ch_outs = ocr_trt.infer(ch_in)
 
-            # detector preprocess
-            img_lb, r, (dw, dh) = letterbox(frame, new_shape=(det_w, det_h))
-            img_rgb = cv2.cvtColor(img_lb, cv2.COLOR_BGR2RGB)
-            inp = img_rgb.astype(np.float32) / 255.0
-            inp = np.transpose(inp, (2, 0, 1))  # HWC -> CHW
-            inp = np.expand_dims(inp, axis=0)   # NCHW
+            ch_dets = postprocess_yolo(ch_outs, conf_th=args.ocr_conf, iou_th=args.nms,
+                                      scale=s2, pad_x=px2, pad_y=py2,
+                                      orig_w=crop.shape[1], orig_h=crop.shape[0])
 
-            det_outs = det.infer(inp)
-            det_out = det_outs[0]
+            raw = decode_plate_from_chars(ch_dets, labels)
+            text = format_vn_plate(raw) if raw != "unknown" else "unknown"
 
-            cand = decode_detector_output(det_out, conf_thr=args.conf)
+            if text != "unknown":
+                plates_count += 1
 
-            # scale back to original frame
-            boxes = []
-            scores = []
-            clses = []
-            for (x1, y1, x2, y2), conf, cls in cand:
-                # coords are in letterbox image space (det_w/det_h)
-                x1 = (x1 - dw) / r
-                y1 = (y1 - dh) / r
-                x2 = (x2 - dw) / r
-                y2 = (y2 - dh) / r
+            # draw bbox + text
+            cv2.rectangle(frame, (x1,y1), (x2,y2), (0,255,0), 2)
+            cv2.putText(frame, text, (x1, max(0, y1-10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0,255,0), 2)
 
-                x1 = max(0, min(frame.shape[1] - 1, x1))
-                y1 = max(0, min(frame.shape[0] - 1, y1))
-                x2 = max(0, min(frame.shape[1] - 1, x2))
-                y2 = max(0, min(frame.shape[0] - 1, y2))
+        # FPS
+        now = time.time()
+        fps = 1.0 / max(1e-6, (now - prev))
+        prev = now
+        cv2.putText(frame, f"FPS {fps:.1f} plates={plates_count}", (10, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
 
-                if x2 - x1 < 5 or y2 - y1 < 5:
-                    continue
+        if args.show == 1:
+            cv2.imshow("ALPR", frame)
+            k = cv2.waitKey(1) & 0xFF
+            if k == ord('q'):
+                break
 
-                boxes.append([x1, y1, x2, y2])
-                scores.append(conf)
-                clses.append(cls)
-
-            keep = nms_boxes(boxes, scores, iou_thr=args.nms)
-
-            plates = 0
-            for i in keep:
-                x1, y1, x2, y2 = boxes[i]
-                conf = scores[i]
-
-                # crop plate
-                crop = frame[int(y1):int(y2), int(x1):int(x2)]
-                if crop.size == 0:
-                    continue
-
-                # OCR preprocess based on engine input
-                # resize to (ocr_w, ocr_h)
-                crop_resized = cv2.resize(crop, (ocr_w, ocr_h), interpolation=cv2.INTER_LINEAR)
-                crop_rgb = cv2.cvtColor(crop_resized, cv2.COLOR_BGR2RGB)
-                oinp = crop_rgb.astype(np.float32) / 255.0
-                oinp = np.transpose(oinp, (2, 0, 1))
-                oinp = np.expand_dims(oinp, 0)
-
-                ocr_outs = ocr.infer(oinp)
-                ocr_logits = ocr_outs[0]
-
-                text_raw, tconf = decoder.decode(ocr_logits)
-                text = format_vn_plate(text_raw)
-                if tconf < args.ocr_min_conf:
-                    text = ""  # confidence thấp -> khỏi show bậy
-
-                # draw
-                cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-
-                label = text if text else "..."
-                # put label above box
-                ty = max(0, int(y1) - 10)
-                cv2.putText(frame, label, (int(x1), ty),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2, cv2.LINE_AA)
-
-                plates += 1
-
-            # HUD
-            cv2.putText(frame, f"FPS {fps:.1f} plates={plates}", (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
-
-            if args.show:
-                cv2.imshow(win, frame)
-                k = cv2.waitKey(1) & 0xFF
-                if k == 27 or k == ord('q'):
-                    break
-
-        cap.release()
-        if args.show:
-            cv2.destroyAllWindows()
-        return 0
-
-    finally:
-        # IMPORTANT: release CUDA context cleanly
-        try:
-            ctx.pop()
-        except Exception:
-            pass
+    cap.release()
+    cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
