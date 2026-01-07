@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Shortcut runner for RTSP.
+"""Shortcut chạy RTSP.
 
-Supports:
-  python3 rtsp.py --rtsp rtsp://ip:8554/stream --show
-  python3 rtsp.py rtsp://ip:8554/stream --show
+Ví dụ:
+  python3 rtsp.py rtsp://192.168.50.2:8554/mac --show
+hoặc:
+  python3 rtsp.py --rtsp rtsp://192.168.50.2:8554/mac --show
+
+Nó gọi webcam_onnx.py với --source rtsp.
 """
 
 import sys
+import subprocess
 
 
 def main():
-    from webcam_onnx import main as alpr_main
-
     args = sys.argv[1:]
 
-    # If user passed URL as positional, convert -> --rtsp URL
-    if args and (not args[0].startswith("-")):
+    # Nếu tham số đầu là rtsp://... thì chuyển thành --rtsp <url>
+    if args and args[0].startswith("rtsp://") and ("--rtsp" not in args):
         args = ["--rtsp", args[0]] + args[1:]
 
-    argv = ["webcam_onnx.py", "--source", "rtsp"] + args
-    sys.argv = argv
-    alpr_main()
+    cmd = [sys.executable, "webcam_onnx.py", "--source", "rtsp"] + args
+    raise SystemExit(subprocess.call(cmd))
 
 
 if __name__ == "__main__":

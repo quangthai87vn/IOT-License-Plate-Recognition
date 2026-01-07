@@ -1,53 +1,55 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -e
 
-MODE="${1:-csi}"          # csi | rtsp
-RTSP_URL_ARG="${2:-}"     # nếu mode=rtsp có thể truyền ở đây
+# Usage:
+#   ./run_alpr.sh csi
+#   ./run_alpr.sh rtsp rtsp://192.168.50.2:8554/mac
+#   ./run_alpr.sh webcam 0
+# Extra args:
+#   ./run_alpr.sh csi --show --csi_w 1280 --csi_h 720 --csi_fps 60
 
-# ====== Config ======
-export IMG_SIZE="${IMG_SIZE:-640}"
-export CONF="${CONF:-0.25}"
-export IOU="${IOU:-0.45}"
-export SHOW="${SHOW:-1}"
-export SKIP="${SKIP:-0}"
-export CODEC="${CODEC:-h264}"
-export RTSP_LATENCY="${RTSP_LATENCY:-200}"
+MODE="${1:-csi}"
+shift || true
 
-# RTSP URL ưu tiên: tham số > env
+pkill -f gst-launch || true
+sudo systemctl restart nvargus-daemon || true
+
+export DISPLAY=${DISPLAY:-:0}
+xhost +local:root >/dev/null 2>&1 || true
+
+IMG="iot-license-plate-recognition:jetson-lpr"
+PROJ_DIR="$(pwd)"
+
+PY_ARGS=("--source" "$MODE")
 if [[ "$MODE" == "rtsp" ]]; then
-  export RTSP_URL="${RTSP_URL_ARG:-${RTSP_URL:-}}"
-  if [[ -z "${RTSP_URL}" ]]; then
-    echo "[ERR] RTSP_URL is empty. Example:"
-    echo "  ./run_alpr.sh rtsp rtsp://192.168.50.2:8554/mac"
-    exit 1
+  if [[ "${1:-}" == rtsp://* ]]; then
+    PY_ARGS+=("--rtsp" "$1")
+    shift
+  fi
+elif [[ "$MODE" == "webcam" ]]; then
+  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+    PY_ARGS+=("--cam" "$1")
+    shift
   fi
 fi
 
-echo "[INFO] MODE=$MODE IMG_SIZE=$IMG_SIZE CONF=$CONF IOU=$IOU SHOW=$SHOW SKIP=$SKIP"
+if [[ " $* " != *" --show "* ]]; then
+  PY_ARGS+=("--show")
+fi
 
-# ====== Clear camera processes ======
-sudo pkill -f gst-launch || true
-sudo systemctl restart nvargus-daemon || true
+PY_ARGS+=("$@")
 
-# ====== X11 for docker GUI ======
-export DISPLAY="${DISPLAY:-:0}"
-xhost +local:docker >/dev/null 2>&1 || true
-
-# ====== Run container and execute ======
-docker run --rm -it \
+exec docker run --rm -it \
   --runtime nvidia \
   --network host \
   --ipc=host \
   --privileged \
   -e DISPLAY="$DISPLAY" \
   -e QT_X11_NO_MITSHM=1 \
-  -e IMG_SIZE -e CONF -e IOU -e SHOW -e SKIP \
-  -e CODEC -e RTSP_LATENCY \
-  ${RTSP_URL:+-e RTSP_URL="$RTSP_URL"} \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
   -v /tmp/argus_socket:/tmp/argus_socket \
   -v /dev:/dev \
-  -v "$PWD":/workspace \
+  -v "$PROJ_DIR":/workspace \
   -w /workspace \
-  iot-license-plate-recognition:jetson-lpr \
-  bash -lc "python3 ${MODE}.py"
+  "$IMG" \
+  python3 webcam_onnx.py "${PY_ARGS[@]}"

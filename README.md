@@ -160,3 +160,11 @@ sudo jetson_clocks
   --workspace=1024 \
   --timingCacheFile=./model/trt_det_cache.bin
 ```
+
+
+# (Docker + CSI/RTSP) — file .sh
+```
+chmod +x run_alpr.sh
+./run_alpr.sh csi
+./run_alpr.sh rtsp rtsp://192.168.50.2:8554/mac
+```
