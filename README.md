@@ -115,6 +115,10 @@ docker run --rm -it \
   python3 csi.py --show --det_every 2 --ocr_every 5
   python3 rtsp.py rtsp://192.168.50.2:8554/mac --show
 
+  python3 csi.py --show 1
+  python3 webcam_onnx.py --source rtsp --rtsp "rtsp://192.168.50.2:8554/mac" --show 1
+  python3 rtsp.py "rtsp://192.168.50.2:8554/mac" --show 1
+
 
 ```
 ## Test CSI pipeline trong container trước khi chạy YOLO - Trong container chạy:
