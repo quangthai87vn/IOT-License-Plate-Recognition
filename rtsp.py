@@ -11,4 +11,8 @@ if len(sys.argv) < 2:
     sys.exit(1)
 
 os.environ["RTSP_URL"] = sys.argv[1]
+
+# IMPORTANT: do NOT pass argv to webcam_onnx.py
+sys.argv = ["webcam_onnx.py"]
+
 runpy.run_path("webcam_onnx.py", run_name="__main__")
