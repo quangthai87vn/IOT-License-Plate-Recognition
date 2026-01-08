@@ -160,5 +160,26 @@ from webcam_onnx import load_labels_from_pt
 print(load_labels_from_pt("model/LP_ocr_nano_62.pt"))
 PY
 
+
+python3 - <<'PY'
+import torch
+pt="model/LP_ocr_nano_62.pt"
+ckpt=torch.load(pt, map_location="cpu")
+print("type:", type(ckpt))
+if isinstance(ckpt, dict):
+    print("keys:", ckpt.keys())
+    names = ckpt.get("names", None)
+    print("ckpt['names']:", names)
+    for k in ["model","ema"]:
+        m = ckpt.get(k, None)
+        if m is None: 
+            continue
+        n = getattr(m, "names", None)
+        if n is None and hasattr(m, "module"):
+            n = getattr(m.module, "names", None)
+        print(f"{k}.names:", n)
+PY
+
+
 ```
 
