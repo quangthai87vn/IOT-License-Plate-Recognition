@@ -110,9 +110,8 @@ docker run --rm -it \
 python3 alpr_onnx_trt_jetson.py \
   --source rtsp \
   --rtsp "rtsp://192.168.50.2:8554/mac" \
-  --in_w 1280 --in_h 720 \
-  --rtsp_latency 80 \
   --rtsp_tcp 1 \
+  --rtsp_latency 200 \
   --show 1
 
 
