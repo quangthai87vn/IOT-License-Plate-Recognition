@@ -107,9 +107,13 @@ docker run --rm -it \
   bash
 
 
-python3 alpr_trt.py --source rtsp --rtsp "rtsp://192.168.50.2:8554/mac" --rtsp_tcp 1 --rtsp_latency 200 --show 1
+python3 alpr_onnx_trt_jetson.py \
+  --source rtsp \
+  --rtsp "rtsp://192.168.50.2:8554/mac" \
+  --rtsp_tcp 1 \
+  --rtsp_latency 200 \
+  --show 1
 
-python3 alpr_pt_jetson.py --source rtsp --rtsp "rtsp://192.168.50.2:8554/mac" --rtsp_tcp 1 --rtsp_latency 200 --show 1
 
 
 ```
