@@ -155,3 +155,10 @@ chmod +x run_alpr.sh
 ./run_alpr.sh csi
 ./run_alpr.sh rtsp rtsp://192.168.50.2:8554/mac
 ```
+
+
+
+python3 - <<'PY'
+from webcam_onnx import load_labels_from_pt
+print(load_labels_from_pt("model/LP_ocr_nano_62.pt"))
+PY
