@@ -142,12 +142,12 @@ sudo jetson_clocks
   --onnx=model/LP_detector_nano_61.onnx \
   --saveEngine=model/LP_detector_nano_61_fp16.engine \
   --fp16 \
-  --minShapes=images:1x3x640x640 --optShapes=images:1x3x640x640 --maxShapes=images:1x3x640x640
-/usr/src/tensorrt/bin/trtexec \
+  --workspace=1024
+  /usr/src/tensorrt/bin/trtexec \
   --onnx=model/LP_ocr_nano_62.onnx \
   --saveEngine=model/LP_ocr_nano_62_fp16.engine \
   --fp16 \
-  --minShapes=images:1x3x640x640 --optShapes=images:1x3x640x640 --maxShapes=images:1x3x640x640
+  --workspace=1024
 ```
 
 # (Docker + CSI/RTSP) — file .sh
