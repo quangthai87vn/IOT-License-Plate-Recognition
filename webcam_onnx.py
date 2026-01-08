@@ -161,26 +161,14 @@ def clip_box(box, w, h):
     return [x1, y1, x2, y2]
 
 
-def load_labels_from_pt(pt_path):
-    """
-    Try extract YOLOv5 class names from .pt (no inference).
-    """
-    try:
-        import torch
-        ckpt = torch.load(pt_path, map_location="cpu")
-        # YOLOv5 checkpoint formats vary
-        if isinstance(ckpt, dict):
-            if "model" in ckpt and hasattr(ckpt["model"], "names"):
-                return ckpt["model"].names
-            if "ema" in ckpt and hasattr(ckpt["ema"], "names"):
-                return ckpt["ema"].names
-        # Sometimes ckpt itself is a model
-        if hasattr(ckpt, "names"):
-            return ckpt.names
-    except Exception:
-        pass
-    return None
-
+def load_labels_from_names(path: str):
+    labels = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if s:
+                labels.append(s)
+    return labels
 
 def read_plate_from_char_dets(char_dets, labels):
     """

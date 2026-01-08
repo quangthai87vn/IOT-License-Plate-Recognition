@@ -107,8 +107,8 @@ docker run --rm -it \
   bash
 
 
-python3 webcam_onnx.py --source rtsp --rtsp "rtsp://192.168.50.2:8554/mac" --show 1 --rtsp_tcp 1 --rtsp_latency 250
-python3 webcam_onnx.py --source csi --cam 0 --show 1
+python3 alpr_trt.py --source rtsp --rtsp "rtsp://192.168.50.2:8554/mac" --show 1
+
 
 
 ```
@@ -132,6 +132,7 @@ docker exec -it <CONTAINER_NAME_OR_ID> bash
 # Export về ONNX trên Jetson nano
 python3 yolov5/export.py --weights model/LP_detector_nano_61.pt --include onnx --img 640 --opset 12 --simplify
 python3 yolov5/export.py --weights model/LP_ocr_nano_62.pt --include onnx --img 640 --opset 12 --simplify
+
 ```
 # Build TensorRT engine OCR DETECTOR ONNX
 ```bash
@@ -147,7 +148,13 @@ sudo jetson_clocks
   --saveEngine=model/LP_ocr_nano_62_fp16.engine \
   --fp16 \
   --workspace=1024
+
+
 ```
+
+
+
+
 
 # (Docker + CSI/RTSP) — file .sh
 ```
