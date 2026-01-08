@@ -393,7 +393,20 @@ def parse_args():
 
     p.add_argument("--fp16", type=int, default=1)
     p.add_argument("--verbose", type=int, default=0)
+
+
+
+    p.add_argument("--min_plate_w", type=int, default=85)
+    p.add_argument("--min_plate_h", type=int, default=25)
+    p.add_argument("--sharp_th", type=float, default=60.0)     # càng cao càng khó qua
+    p.add_argument("--min_chars", type=int, default=5)         # tối thiểu ký tự hợp lệ
+    p.add_argument("--no_unknown", type=int, default=1)        # 1 = không hiện unknown
+
     return p.parse_args()
+
+def sharpness_score(bgr):
+    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    return cv2.Laplacian(g, cv2.CV_64F).var()
 
 
 def main():
@@ -455,6 +468,17 @@ def main():
             if crop.size == 0:
                 continue
 
+            # --- FILTER 1: skip biển quá nhỏ
+            pw = x2 - x1
+            ph = y2 - y1
+            if pw < args.min_plate_w or ph < args.min_plate_h:
+                continue
+
+            # --- FILTER 2: skip biển bị mờ / nát
+            if sharpness_score(crop) < args.sharp_th:
+                continue
+
+
             # ----- OCR preprocess (on crop)
             img_ocr, r_ocr, pad_ocr = letterbox(crop, args.img)
             img_ocr = cv2.cvtColor(img_ocr, cv2.COLOR_BGR2RGB)
@@ -474,13 +498,22 @@ def main():
                 boxes.append([ox1, oy1, ox2, oy2])
                 clss.append(cid)
 
-            text = decode_plate(np.array(boxes, dtype=np.float32), np.array(clss, dtype=np.int32), labels)
+            
+            text = decode_plate(np.array(boxes, dtype=np.float32),
+                    np.array(clss, dtype=np.int32),
+                    labels)
+
+            # --- FILTER 3: không đạt -> skip, không in unknown
+            if (text == "unknown") or (len(text) < args.min_chars):
+                continue
+
             texts.append(text)
 
-            # draw
+
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             cv2.putText(frame, text, (x1, max(0, y1 - 10)),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2, cv2.LINE_AA)
+
 
         hud = "FPS %.1f plates=%d" % (fps, len(texts))
         cv2.putText(frame, hud, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0,
